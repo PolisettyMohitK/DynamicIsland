@@ -290,7 +290,7 @@ pub enum Done {
     Text(String),
 }
 
-fn png_base64(rgba: &[u8], w: i32, h: i32) -> String {
+pub(crate) fn png_base64(rgba: &[u8], w: i32, h: i32) -> String {
     let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut out = Vec::new();
     {

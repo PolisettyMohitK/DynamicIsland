@@ -131,16 +131,16 @@ pub fn choco_mics() -> Vec<String> {
 }
 
 fn run(app: AppHandle, choco: Arc<Choco>) {
-    let mut models: Option<(Wake, Stt)> = None;
+    let mut wake: Option<Wake> = None;
     loop {
         if !choco.enabled.load(Ordering::Relaxed) || crate::game::on() {
             std::thread::sleep(Duration::from_millis(250));
             continue;
         }
-        if models.is_none() {
+        if wake.is_none() {
             emit(&app, Event::Loading);
             match load(&app) {
-                Ok(m) => models = Some(m),
+                Ok(w) => wake = Some(w),
                 Err(e) => {
                     emit(&app, Event::Error { message: format!("Couldn't load voice models: {e}") });
                     choco.enabled.store(false, Ordering::Relaxed);
@@ -148,8 +148,8 @@ fn run(app: AppHandle, choco: Arc<Choco>) {
                 }
             }
         }
-        let (wake, stt) = models.as_mut().unwrap();
-        if let Err(e) = listen(&app, &choco, wake, stt) {
+        let wake = wake.as_mut().unwrap();
+        if let Err(e) = listen(&app, &choco, wake) {
             emit(&app, Event::Error { message: format!("Microphone: {e}") });
             // Try again shortly (e.g. a headset was unplugged).
             std::thread::sleep(Duration::from_secs(3));
@@ -157,7 +157,22 @@ fn run(app: AppHandle, choco: Arc<Choco>) {
     }
 }
 
-fn load(app: &AppHandle) -> Res<(Wake, Stt)> {
+/// Speech-to-text, shared by "Hey Choco" and dictation so Moonshine is only in memory once.
+static STT: Mutex<Option<Stt>> = Mutex::new(None);
+
+fn load(app: &AppHandle) -> Res<Wake> {
+    let dir = fetch(app)?;
+    let env = ort::init().with_name("choco").build()?;
+    let wake = Wake::new(&env, &dir, WAKE_MODEL)?;
+    load_stt(app)?;
+    Ok(wake)
+}
+
+/// Downloads any missing models; returns their folder.
+fn fetch(app: &AppHandle) -> Res<PathBuf> {
+    // Two callers at once would download the same files twice.
+    static FETCHING: Mutex<()> = Mutex::new(());
+    let _one = FETCHING.lock().unwrap();
     let dir = app.path().app_local_data_dir()?.join("models");
     std::fs::create_dir_all(&dir)?;
     for (name, url) in MODELS {
@@ -167,8 +182,29 @@ fn load(app: &AppHandle) -> Res<(Wake, Stt)> {
             tauri::async_runtime::block_on(download(&url, &path))?;
         }
     }
+    Ok(dir)
+}
+
+/// Loads Moonshine if it isn't already.
+pub(crate) fn load_stt(app: &AppHandle) -> Res<()> {
+    if STT.lock().unwrap().is_some() {
+        return Ok(());
+    }
+    let dir = fetch(app)?;
     let env = ort::init().with_name("choco").build()?;
-    Ok((Wake::new(&env, &dir, WAKE_MODEL)?, Stt::new(&env, &dir)?))
+    let stt = Stt::new(&env, &dir)?;
+    STT.lock().unwrap().get_or_insert(stt);
+    Ok(())
+}
+
+/// 16kHz mono audio (int16 scale) to text. Call `load_stt` first.
+pub(crate) fn transcribe(audio: &[f32]) -> Res<String> {
+    STT.lock().unwrap().as_mut().ok_or("speech model isn't loaded")?.transcribe(audio)
+}
+
+/// The microphone picked in Choco's settings, or None for the Windows default.
+pub(crate) fn mic(app: &AppHandle) -> Option<String> {
+    app.state::<Arc<Choco>>().mic.lock().unwrap().clone()
 }
 
 async fn download(url: &str, to: &Path) -> Res<()> {
@@ -190,7 +226,7 @@ fn session(env: &Environment, path: PathBuf) -> Res<Session> {
 }
 
 /// Runs until Choco is turned off or its settings change (Ok), or the microphone fails (Err).
-fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake, stt: &mut Stt) -> Res<()> {
+fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake) -> Res<()> {
     choco.reopen.store(false, Ordering::Relaxed);
     let mic = choco.mic.lock().unwrap().clone();
     let (_stream, rx) = open_mic(mic.as_deref())?;
@@ -244,7 +280,7 @@ fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake, stt: &mut Stt) -> Res
                         match done {
                             Some(audio) => {
                                 emit(app, Event::Thinking);
-                                let text = stt.transcribe(&audio)?;
+                                let text = transcribe(&audio)?;
                                 emit(app, Event::Heard { text });
                             }
                             None => emit(app, Event::Idle),
@@ -297,7 +333,7 @@ impl Command {
 }
 
 /// A microphone (by name, else the default) as 16kHz mono, in int16 scale (what openWakeWord expects).
-fn open_mic(name: Option<&str>) -> Res<(cpal::Stream, Receiver<Vec<f32>>)> {
+pub(crate) fn open_mic(name: Option<&str>) -> Res<(cpal::Stream, Receiver<Vec<f32>>)> {
     let host = cpal::default_host();
     let named = name.and_then(|n| host.input_devices().ok()?.find(|d| d.name().is_ok_and(|d| d == n)));
     // A chosen mic that's unplugged falls back to the default.

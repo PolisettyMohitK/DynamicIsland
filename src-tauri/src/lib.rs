@@ -13,6 +13,8 @@ mod stats;
 mod apps;
 mod clipboard;
 mod wallpaper;
+mod dictation;
+mod circle;
 mod game;
 mod island;
 mod choco;
@@ -45,6 +47,8 @@ pub fn run() {
             pet::spawn(app.handle().clone());
             game::spawn(app.handle().clone());
             clipboard::start(app.handle().clone());
+            dictation::spawn(app.handle().clone());
+            circle::spawn(app.handle().clone());
 
             let toggle = MenuItem::with_id(app, "toggle", "Hide island", true, None::<&str>)?;
             let voice = MenuItem::with_id(app, "voice", "Hey Choco on/off", true, None::<&str>)?;
@@ -106,6 +110,11 @@ pub fn run() {
             wallpaper::wallpaper_thumb,
             wallpaper::wallpaper_set,
             wallpaper::wallpaper_open_folder,
+            dictation::dictation_set_enabled,
+            circle::circle_close,
+            circle::circle_stop_listening,
+            circle::circle_listen,
+            circle::circle_ask,
             pet::pet_configure,
             pet::pet_config,
             pet::pet_wake,

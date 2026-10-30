@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-const URL: &str = "https://opencode.ai/inference/go/openai/v1/chat/completions";
-const MODEL: &str = "deepseek-v4.1-flash";
+pub(crate) const URL: &str = "https://opencode.ai/inference/go/openai/v1/chat/completions";
+pub(crate) const MODEL: &str = "deepseek-v4.1-flash";
 
 const SYSTEM: &str = "You are Choco, a calm, warm little assistant that lives in the notch at the top of \
 the user's Windows screen. The user's words come from speech-to-text, so allow for misheard words. \
