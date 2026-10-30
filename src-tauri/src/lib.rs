@@ -8,6 +8,7 @@ use tauri::{Emitter, Manager};
 mod ask;
 mod capture;
 mod computer;
+mod control;
 mod game;
 mod island;
 mod choco;
@@ -83,6 +84,12 @@ pub fn run() {
             computer::computer_run,
             computer::computer_stop,
             computer::computer_answer,
+            control::control_state,
+            control::control_set_radio,
+            control::control_set_dark,
+            control::control_set_brightness,
+            control::control_set_output,
+            control::control_power,
             pet::pet_configure,
             pet::pet_config,
             pet::pet_wake,

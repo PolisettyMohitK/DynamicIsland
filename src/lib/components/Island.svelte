@@ -22,6 +22,7 @@
   import Bars from './Bars.svelte';
   import BatteryRing from './BatteryRing.svelte';
   import ChocoFace, { type Mood } from './ChocoFace.svelte';
+  import ControlCentre from './ControlCentre.svelte';
   import Digits from './Digits.svelte';
   import Glass from './Glass.svelte';
   import Icon from './Icon.svelte';
@@ -37,12 +38,12 @@
   import WaterPage from './pages/WaterPage.svelte';
 
   /** idle and live are resting states (cursor away); the rest are shown on hover or for events. */
-  type Mode = 'idle' | 'live' | 'peek' | 'expanded' | 'popup' | 'voice' | 'work' | 'answer' | 'settings';
+  type Mode = 'idle' | 'live' | 'peek' | 'expanded' | 'popup' | 'voice' | 'work' | 'answer' | 'settings' | 'control';
 
   // Size of each state in logical px; r is the radius of the bottom corners.
   // `wide` is the expanded island with the lyrics column open. Answers and settings
   // are as tall as what they show.
-  const SHAPES: Record<Exclude<Mode, 'answer' | 'settings'> | 'wide', Shape> = {
+  const SHAPES: Record<Exclude<Mode, 'answer' | 'settings' | 'control'> | 'wide', Shape> = {
     idle: { w: 100, h: 30, r: 15 },
     live: { w: 390, h: 36, r: 18 },
     peek: { w: 190, h: 28, r: 14 },
@@ -57,6 +58,7 @@
   /** The resting pill while Choco sleeps in it: the time on its left, the day on its right. */
   const SLEEPING: Shape = { w: 184, h: 32, r: 16 };
   const SETTINGS_W = 720;
+  const CONTROL_W = 560;
   // Short answers sit in a narrower island than long ones or ones with a card.
   const ANSWER_W = 460;
   const ANSWER_WIDE_W = 540;
@@ -88,6 +90,7 @@
   let lyricsOn = $state(loadLyricsOn());
   let answerH = $state(0);
   let settingsH = $state(0);
+  let controlH = $state(0);
 
   let hovered = false;
   /** A reminder that arrived while the island was open. */
@@ -113,6 +116,8 @@
       ? SHAPES.wide
       : mode === 'answer'
         ? { w: answerW, h: fit(Math.max(56, answerH)), r: 28 }
+        : mode === 'control'
+          ? { w: CONTROL_W, h: fit(Math.max(120, controlH)), r: 36 }
         : mode === 'settings'
           ? { w: SETTINGS_W, h: fit(Math.max(180, settingsH)), r: 32 }
           : mode === 'idle' && petOut
@@ -122,7 +127,7 @@
               : SHAPES[mode],
   );
   const voice = $derived(mode === 'voice' || mode === 'work' || mode === 'answer');
-  const grow = $derived(mode === 'expanded' || mode === 'settings' || mode === 'popup' || mode === 'live' || voice);
+  const grow = $derived(mode === 'expanded' || mode === 'settings' || mode === 'control' || mode === 'popup' || mode === 'live' || voice);
   /** Where the island settles when nothing else is going on. */
   const rest = $derived<Mode>(focus.running || (nowPlaying.media?.playing && lyricsOn) ? 'live' : 'idle');
   /** A running focus timer takes the live bar over from music. */
@@ -191,7 +196,7 @@
       return;
     }
     // Back in during the leave grace: stay open.
-    if (mode === 'expanded' || mode === 'settings') {
+    if (mode === 'expanded' || mode === 'settings' || mode === 'control') {
       play();
       return;
     }
@@ -209,7 +214,7 @@
       const p = missed;
       missed = null;
       showPopup(p);
-    } else if (mode === 'expanded' || mode === 'settings')
+    } else if (mode === 'expanded' || mode === 'settings' || mode === 'control')
       // A slip of the cursor shouldn't close it: hold a moment before collapsing.
       play(['peek', LEAVE_HOLD], ['rest', LEAVE_HOLD + 120]);
     else if (mode === 'popup') play(['peek', 0], ['rest', 120]);
@@ -241,12 +246,23 @@
     page = i;
   }
 
+  // Scroll down on the island for the Control Centre, up to come back; sideways turns pages.
   function onWheel(e: WheelEvent) {
-    if (mode !== 'expanded' || ui.typing || Date.now() - lastWheel < 350) return;
-    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (ui.typing || Date.now() - lastWheel < 350) return;
+    const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
+    const d = sideways ? e.deltaX || e.deltaY : e.deltaY;
     if (d === 0) return;
-    lastWheel = Date.now();
-    go(d > 0 ? 1 : -1);
+    if (sideways) {
+      if (mode !== 'expanded') return;
+      lastWheel = Date.now();
+      go(d > 0 ? 1 : -1);
+    } else if (d > 0 && (mode === 'expanded' || mode === 'peek')) {
+      lastWheel = Date.now();
+      play(['control', 0]);
+    } else if (d < 0 && mode === 'control') {
+      lastWheel = Date.now();
+      play(['expanded', 0]);
+    }
   }
 
   // Tell the backend where the island is so clicks elsewhere pass through to the desktop.
@@ -275,7 +291,7 @@
 
   // Once a field is done and the cursor has already gone, close as if it just left.
   $effect(() => {
-    if (!ui.typing && !hovered && (mode === 'expanded' || mode === 'settings')) onLeave();
+    if (!ui.typing && !hovered && (mode === 'expanded' || mode === 'settings' || mode === 'control')) onLeave();
   });
 
   $effect(() => {
@@ -471,6 +487,10 @@
       {#if liveTimer}
         <b class="countdown">{mmss(Math.ceil(focus.remaining(clock.now) / 1000) * 1000)}</b>
       {/if}
+    </div>
+  {:else if mode === 'control'}
+    <div class="layer" bind:offsetHeight={controlH} in:materialise={{ duration: 200, delay: 90 }} out:fade={{ duration: 80 }}>
+      <ControlCentre />
     </div>
   {:else if mode === 'settings'}
     <div class="layer" bind:offsetHeight={settingsH} in:materialise={{ duration: 180, delay: 100 }} out:fade={{ duration: 80 }}>
