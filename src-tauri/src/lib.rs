@@ -9,6 +9,9 @@ mod ask;
 mod capture;
 mod computer;
 mod control;
+mod stats;
+mod apps;
+mod clipboard;
 mod game;
 mod island;
 mod choco;
@@ -40,6 +43,7 @@ pub fn run() {
             choco::spawn(app.handle().clone());
             pet::spawn(app.handle().clone());
             game::spawn(app.handle().clone());
+            clipboard::start(app.handle().clone());
 
             let toggle = MenuItem::with_id(app, "toggle", "Hide island", true, None::<&str>)?;
             let voice = MenuItem::with_id(app, "voice", "Hey Choco on/off", true, None::<&str>)?;
@@ -90,6 +94,13 @@ pub fn run() {
             control::control_set_brightness,
             control::control_set_output,
             control::control_power,
+            stats::stats_read,
+            stats::stats_stop,
+            apps::apps_list,
+            apps::apps_launch,
+            clipboard::clipboard_history,
+            clipboard::clipboard_clear,
+            clipboard::clipboard_paste,
             pet::pet_configure,
             pet::pet_config,
             pet::pet_wake,

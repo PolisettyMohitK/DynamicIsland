@@ -6,8 +6,11 @@
   import type { IconName } from '$lib/icons';
   import Icon from './Icon.svelte';
   import Artwork from './music/Artwork.svelte';
+  import AppsTab from './cc/AppsTab.svelte';
+  import ClipboardTab from './cc/ClipboardTab.svelte';
+  import StatsTab from './cc/StatsTab.svelte';
 
-  const TABS = ['Controls', 'Power'] as const;
+  const TABS = ['Controls', 'Stats', 'Clipboard', 'Apps', 'Power'] as const;
   const POWER: { action: PowerAction; label: string; icon: IconName; confirm?: boolean }[] = [
     { action: 'lock', label: 'Lock', icon: 'lock' },
     { action: 'sleep', label: 'Sleep', icon: 'moon' },
@@ -144,6 +147,12 @@
         {/if}
       {/if}
     </div>
+  {:else if tab === 'Stats'}
+    <div class="body" in:fade={{ duration: 160 }}><StatsTab /></div>
+  {:else if tab === 'Clipboard'}
+    <div class="body" in:fade={{ duration: 160 }}><ClipboardTab /></div>
+  {:else if tab === 'Apps'}
+    <div class="body" in:fade={{ duration: 160 }}><AppsTab /></div>
   {:else}
     <div class="body" in:fade={{ duration: 160 }}>
       <div class="tiles five">

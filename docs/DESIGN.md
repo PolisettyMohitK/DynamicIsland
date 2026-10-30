@@ -111,6 +111,9 @@ Navigation: `‹` and `›` circular buttons on the left/right edges, page dots 
 
 - **Open**: scroll down on the island (hovered or expanded). Scroll up goes back to the pages; the cursor leaving collapses it after the usual 1s hold.
 - **Controls**: tiles for Wi-Fi, Bluetooth and the output device (a list to pick from), dark mode and mute; volume and brightness sliders (brightness only on built-in panels); now playing. A switch's state lives in its round icon, lit white when on.
+- **Stats**: CPU, GPU, RAM and VRAM rings, the apps using the most memory, disk, network rate, uptime. Sampled once a second only while the tab is open (`stats.rs`: sysinfo, PDH GPU counters like Task Manager's, DXGI for the GPU name).
+- **Clipboard**: the last 30 texts copied, in memory only; skips anything its app marks private (password managers). Click one to paste it into the app in use (`clipboard.rs`).
+- **Apps**: search the Start menu (`Get-StartApps`, read once), Enter opens the top hit; recent apps when the search is empty (`apps.rs`).
 - **Power**: lock, sleep, sign out, restart, shut down. The last three need a second click within 3s.
 - **How** (`src-tauri/src/control.rs`): WinRT radios, the Personalize registry keys plus a `WM_SETTINGCHANGE` broadcast, WMI brightness, the undocumented `IPolicyConfig` for the default output (what EarTrumpet uses), `shutdown.exe`. State is read when it opens; nothing polls.
 

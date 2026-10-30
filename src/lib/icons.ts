@@ -41,6 +41,7 @@ export const ICONS = {
   power: 'M12 3.5v8M7.2 6.3a7 7 0 1 0 9.6 0',
   logout: 'M14 4.5h3.5A1.5 1.5 0 0 1 19 6v12a1.5 1.5 0 0 1-1.5 1.5H14M10 8l-4 4 4 4M6 12h9',
   'chevron-down': 'M6.5 9.5L12 15l5.5-5.5',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
 } as const;
 
 export type IconName = keyof typeof ICONS;

@@ -252,6 +252,11 @@
     const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey;
     const d = sideways ? e.deltaX || e.deltaY : e.deltaY;
     if (d === 0) return;
+    // A list that can still scroll that way keeps the wheel for itself.
+    for (let el = e.target as HTMLElement | null; !sideways && el && el !== e.currentTarget; el = el.parentElement) {
+      if (getComputedStyle(el).overflowY !== 'auto') continue;
+      if (d < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return;
+    }
     if (sideways) {
       if (mode !== 'expanded') return;
       lastWheel = Date.now();
