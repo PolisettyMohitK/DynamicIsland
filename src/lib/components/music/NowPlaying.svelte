@@ -1,0 +1,94 @@
+<script lang="ts">
+  import { nowPlaying } from '$lib/media.svelte';
+  import Bars from '../Bars.svelte';
+  import Icon from '../Icon.svelte';
+  import Artwork from './Artwork.svelte';
+  import Controls from './Controls.svelte';
+  import Progress from './Progress.svelte';
+
+  let { lyricsOn, onLyrics }: { lyricsOn: boolean; onLyrics: () => void } = $props();
+</script>
+
+{#if nowPlaying.media}
+  <div class="art" class:paused={!nowPlaying.media.playing}><Artwork size={64} /></div>
+  <div class="meta">
+    <b>{nowPlaying.media.title}</b>
+    <span>{nowPlaying.media.artist}</span>
+  </div>
+  <div class="eq">
+    <Bars playing={nowPlaying.media.playing} colour={nowPlaying.colour ? `rgb(${nowPlaying.colour})` : 'var(--text-dim)'} size={14} />
+  </div>
+  <div class="progress"><Progress /></div>
+  <div class="controls"><Controls {lyricsOn} {onLyrics} /></div>
+{:else}
+  <div class="empty">
+    <Icon name="music" size={24} />
+    <span>Nothing playing</span>
+  </div>
+{/if}
+
+<style>
+  .art {
+    position: absolute;
+    left: var(--edge);
+    top: 16px;
+    border-radius: 12px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    transition: transform 420ms var(--spring);
+  }
+  /* The artwork sinks back a little while paused. */
+  .art.paused {
+    transform: scale(0.9);
+  }
+  .meta {
+    position: absolute;
+    left: 120px;
+    right: 72px;
+    top: 44px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .meta b,
+  .meta span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .meta b {
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .meta span {
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+  .eq {
+    position: absolute;
+    right: var(--edge);
+    top: 50px;
+  }
+  .progress {
+    position: absolute;
+    left: var(--edge);
+    right: var(--edge);
+    top: 92px;
+  }
+  .controls {
+    position: absolute;
+    left: calc(var(--edge) - 6px);
+    right: calc(var(--edge) - 6px);
+    top: 116px;
+  }
+  .empty {
+    position: absolute;
+    inset: 44px 52px 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-faint);
+  }
+</style>

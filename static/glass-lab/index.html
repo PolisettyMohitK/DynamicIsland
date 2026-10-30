@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Glass Lab</title>
+<style>
+  :root {
+    --blur: 6px;
+    --refraction: 60;
+    --bezel: 22;
+    --dispersion: 0.08;
+    --tint: #0a0a0e;
+    --tint-alpha: 0.6;
+    --saturation: 1.6;
+    --brightness: 0.9;
+    --specular: 0.7;
+    --rim: 1.5px;
+    --light: 135deg;
+    --shadow: 0.5;
+    --sheen: 0.08;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #111; color: #eee;
+    font: 13px/1.4 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  }
+  .stage {
+    position: relative; height: 420px; overflow: hidden;
+    background: #222 center top / cover no-repeat;
+  }
+  .stage.desktop { background-image: url(desktop.jpg); }
+  .stage.colour {
+    background:
+      radial-gradient(circle at 30% 20%, #ff3d7f 0 12%, transparent 13%),
+      radial-gradient(circle at 62% 8%, #2fd4ff 0 9%, transparent 10%),
+      radial-gradient(circle at 48% 35%, #ffd23d 0 7%, transparent 8%),
+      repeating-linear-gradient(90deg, #1b1b2a 0 40px, #26263a 40px 80px);
+  }
+  .stage.light { background: #f4f4f6; }
+  .stage .filler {
+    position: absolute; inset: 70px 0 0; padding: 0 40px; font-size: 22px; font-weight: 600;
+    color: rgba(255,255,255,.85); columns: 3; pointer-events: none;
+  }
+  .stage.light .filler { color: #222; }
+  .stage.desktop .filler { display: none; }
+
+  /* ── The glass ─────────────────────────────── */
+  .island {
+    position: absolute; top: 0; left: 50%; transform: translateX(-50%);
+    width: 545px; height: 180px; border-radius: 0 0 32px 32px;
+    color: #fff; overflow: hidden; isolation: isolate;
+    box-shadow:
+      0 18px 50px rgba(0,0,0,var(--shadow)),
+      0 2px 6px rgba(0,0,0,calc(var(--shadow) * .6)),
+      inset 0 0 14px rgba(255,255,255,calc(var(--specular) * .12));
+    transition: width 260ms cubic-bezier(.22,1,.36,1), height 260ms cubic-bezier(.22,1,.36,1), border-radius 260ms;
+  }
+  .island.peek { width: 190px; height: 28px; border-radius: 0 0 14px 14px; }
+  .island.popup { width: 425px; height: 36px; border-radius: 0 0 18px 18px; }
+  /* Specular rim: a thin gradient border lit from --light */
+  .island::before {
+    content: ''; position: absolute; inset: 0; border-radius: inherit; padding: 0 var(--rim) var(--rim);
+    pointer-events: none; z-index: 2;
+    background: linear-gradient(var(--light),
+      rgba(255,255,255,var(--specular)) 0%,
+      rgba(255,255,255,calc(var(--specular) * .15)) 28%,
+      rgba(255,255,255,0) 50%,
+      rgba(255,255,255,calc(var(--specular) * .15)) 72%,
+      rgba(255,255,255,calc(var(--specular) * .55)) 100%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+  }
+
+  /* What's behind the island, drawn inside it and bent by the lens filter.
+     In the real app this is a live capture of the desktop under the island. */
+  .glass { position: absolute; inset: 0; z-index: -1; filter: url(#lens) saturate(var(--saturation)) brightness(var(--brightness)); }
+  .backdrop { position: absolute; top: 0; left: 50%; transform: translateX(-50%); height: 420px; }
+  /* Dark tint and top sheen sit on top of the bent background */
+  .tint {
+    position: absolute; inset: 0; z-index: -1;
+    background:
+      linear-gradient(to bottom, rgba(255,255,255,var(--sheen)), rgba(255,255,255,0) 45%),
+      color-mix(in srgb, var(--tint) calc(var(--tint-alpha) * 100%), transparent);
+  }
+
+  /* Sample content */
+  .content { position: absolute; inset: 0; transition: opacity 150ms; }
+  .island:not(.expanded) .content { opacity: 0; }
+  .art { position: absolute; left: 30px; top: 20px; width: 72px; height: 72px; border-radius: 14px;
+         background: linear-gradient(135deg, #ff2d55, #7a1cff); }
+  .hdr { position: absolute; left: 0; right: 0; top: 14px; text-align: center; font-size: 14px; }
+  .hdr b { margin-left: 6px; }
+  .track { position: absolute; left: 118px; top: 50px; }
+  .track b { display: block; font-size: 17px; }
+  .track span { color: rgba(255,255,255,.6); }
+  .bar { position: absolute; left: 30px; right: 30px; top: 116px; display: flex; gap: 12px; align-items: center; font-variant-numeric: tabular-nums; }
+  .bar i { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,.25); position: relative; }
+  .bar i::after { content: ''; position: absolute; inset: 0 55% 0 0; border-radius: 3px; background: #fff; }
+  .ctrls { position: absolute; left: 0; right: 0; top: 140px; text-align: center; font-size: 20px; letter-spacing: 26px; }
+
+  /* Controls panel */
+  .panel { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px 22px; padding: 16px; }
+  .panel label { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; }
+  .panel label output { color: #9af; font-variant-numeric: tabular-nums; }
+  .panel input[type=range] { grid-column: 1 / -1; width: 100%; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 0; }
+  .row button { background: #2a2a33; color: #eee; border: 1px solid #3a3a46; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+  .row button.on { background: #3d5cff; border-color: #3d5cff; }
+  textarea { width: calc(100% - 32px); margin: 0 16px 16px; height: 90px; background: #1a1a20; color: #9af; border: 1px solid #333; border-radius: 8px; font: 12px ui-monospace, Consolas, monospace; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <filter id="lens" filterUnits="userSpaceOnUse" x="0" y="0" width="545" height="180" color-interpolation-filters="sRGB">
+    <feImage id="map" x="0" y="0" width="545" height="180" preserveAspectRatio="none" result="map" />
+    <feGaussianBlur id="blur" in="SourceGraphic" stdDeviation="6" edgeMode="duplicate" result="soft" />
+    <feDisplacementMap id="dR" in="soft" in2="map" scale="60" xChannelSelector="R" yChannelSelector="G" result="r" />
+    <feDisplacementMap id="dG" in="soft" in2="map" scale="60" xChannelSelector="R" yChannelSelector="G" result="g" />
+    <feDisplacementMap id="dB" in="soft" in2="map" scale="60" xChannelSelector="R" yChannelSelector="G" result="b" />
+    <feColorMatrix in="r" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="rr" />
+    <feColorMatrix in="g" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="gg" />
+    <feColorMatrix in="b" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="bb" />
+    <feComposite in="rr" in2="gg" operator="arithmetic" k2="1" k3="1" result="rg" />
+    <feComposite in="rg" in2="bb" operator="arithmetic" k2="1" k3="1" />
+  </filter>
+</svg>
+
+<div class="stage desktop" id="stage">
+  <div class="filler">Background content to look at through the glass. The quick brown fox jumps over the lazy dog. 0123456789 — ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz.</div>
+  <div class="island expanded" id="island">
+    <div class="glass"><div class="backdrop" id="backdrop"></div></div>
+    <div class="tint"></div>
+    <div class="content">
+      <div class="hdr">Thu 29 Oct <b>00:52</b></div>
+      <div class="art"></div>
+      <div class="track"><b>Puede Ser</b><span>Ale Cominotti</span></div>
+      <div class="bar"><span>02:37</span><i></i><span>-03:47</span></div>
+      <div class="ctrls">⏮⏸⏭</div>
+    </div>
+  </div>
+</div>
+
+<div class="row" id="bgs">
+  <button data-bg="desktop" class="on">Your desktop</button>
+  <button data-bg="colour">Colourful</button>
+  <button data-bg="light">Light page</button>
+  <span style="width:16px"></span>
+  <button data-mode="expanded" class="on">Expanded</button>
+  <button data-mode="peek">Peek</button>
+  <button data-mode="popup">Pop-up</button>
+</div>
+<div class="panel" id="panel"></div>
+<textarea id="out" readonly></textarea>
+
+<script>
+const SIZES = { expanded: [545, 180, 32], peek: [190, 28, 14], popup: [425, 36, 18] };
+const CONTROLS = [
+  ['refraction', 'Refraction (lens strength)', 0, 160, 1, ''],
+  ['bezel', 'Glass thickness (bezel px)', 2, 60, 1, ''],
+  ['dispersion', 'Chromatic dispersion', 0, 0.4, 0.01, ''],
+  ['blur', 'Blur', 0, 40, 0.5, 'px'],
+  ['tint-alpha', 'Dark tint', 0, 0.95, 0.01, ''],
+  ['saturation', 'Saturation', 0.5, 3, 0.05, ''],
+  ['brightness', 'Brightness', 0.3, 1.5, 0.01, ''],
+  ['specular', 'Specular highlight', 0, 1, 0.01, ''],
+  ['rim', 'Rim width', 0, 4, 0.1, 'px'],
+  ['light', 'Light angle', 0, 360, 1, 'deg'],
+  ['sheen', 'Top sheen', 0, 0.4, 0.01, ''],
+  ['shadow', 'Drop shadow', 0, 1, 0.01, ''],
+];
+const root = document.documentElement;
+const island = document.getElementById('island');
+const panel = document.getElementById('panel');
+const out = document.getElementById('out');
+let mode = 'expanded';
+
+for (const [key, label, min, max, step, unit] of CONTROLS) {
+  const val = parseFloat(getComputedStyle(root).getPropertyValue('--' + key));
+  const el = document.createElement('label');
+  el.innerHTML = `${label}<output>${val}${unit}</output><input type="range" min="${min}" max="${max}" step="${step}" value="${val}">`;
+  const input = el.querySelector('input'), o = el.querySelector('output');
+  input.addEventListener('input', () => {
+    root.style.setProperty('--' + key, input.value + unit);
+    o.textContent = input.value + unit;
+    if (['refraction', 'bezel', 'dispersion', 'blur'].includes(key)) updateLens();
+    dump();
+  });
+  panel.appendChild(el);
+}
+const tintEl = document.createElement('label');
+tintEl.innerHTML = `Tint colour<output></output><input type="color" value="#0a0a0e" style="grid-column:1/-1;width:100%">`;
+tintEl.querySelector('input').addEventListener('input', (e) => { root.style.setProperty('--tint', e.target.value); dump(); });
+panel.appendChild(tintEl);
+
+function v(key) { return parseFloat(getComputedStyle(root).getPropertyValue('--' + key)); }
+
+/** Displacement map for a flat-topped island with rounded bottom corners.
+    Near the left, right and bottom edges, pixels sample from further inside,
+    which bends the background like the rim of a thick glass slab. */
+function makeMap(w, h, r, bezel) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); const img = ctx.createImageData(w, h); const px = img.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const X = x + 0.5, Y = y + 0.5;
+    let d, nx = 0, ny = 0;
+    if (Y > h - r && (X < r || X > w - r)) {
+      const cx = X < r ? r : w - r, cy = h - r, dx = X - cx, dy = Y - cy, len = Math.hypot(dx, dy) || 1;
+      d = r - len; nx = dx / len; ny = dy / len;
+    } else {
+      const dl = X, dr = w - X, db = h - Y;
+      d = Math.min(dl, dr, db);
+      if (d === dl) nx = -1; else if (d === dr) nx = 1; else ny = 1;
+    }
+    let mag = 0;
+    if (d < bezel) { const t = 1 - Math.max(d, 0) / bezel; mag = 1 - Math.sqrt(1 - t * t); } // circular lens profile
+    const i = (y * w + x) * 4;
+    px[i] = 128 - nx * mag * 127; px[i + 1] = 128 - ny * mag * 127; px[i + 2] = 128; px[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL();
+}
+
+function updateLens() {
+  const [w, h, r] = SIZES[mode];
+  const f = document.getElementById('lens');
+  for (const el of [f, document.getElementById('map')]) { el.setAttribute('width', w); el.setAttribute('height', h); }
+  document.getElementById('map').setAttribute('href', makeMap(w, h, r, v('bezel')));
+  const s = v('refraction'), k = v('dispersion');
+  document.getElementById('dR').setAttribute('scale', s * (1 - k));
+  document.getElementById('dG').setAttribute('scale', s);
+  document.getElementById('dB').setAttribute('scale', s * (1 + k));
+  document.getElementById('blur').setAttribute('stdDeviation', v('blur'));
+  syncBackdrop();
+}
+
+// Copy the stage's background into the island so it lines up with what's behind.
+function syncBackdrop() {
+  const stage = document.getElementById('stage'), cs = getComputedStyle(stage), b = document.getElementById('backdrop');
+  b.style.width = stage.clientWidth + 'px';
+  b.style.background = cs.background;
+  b.style.backgroundSize = cs.backgroundSize;
+  b.style.backgroundPosition = cs.backgroundPosition;
+}
+addEventListener('resize', syncBackdrop);
+
+function dump() {
+  const vars = [...CONTROLS.map(c => c[0]), 'tint'].map(k => `  --glass-${k}: ${getComputedStyle(root).getPropertyValue('--' + k).trim()};`);
+  out.value = ':root {\n' + vars.join('\n') + '\n}';
+}
+
+document.getElementById('bgs').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.bg) {
+    document.getElementById('stage').className = 'stage ' + b.dataset.bg;
+    document.querySelectorAll('[data-bg]').forEach(x => x.classList.toggle('on', x === b));
+    syncBackdrop();
+  } else {
+    mode = b.dataset.mode;
+    island.className = 'island ' + mode;
+    document.querySelectorAll('[data-mode]').forEach(x => x.classList.toggle('on', x === b));
+    setTimeout(updateLens, 280);
+  }
+});
+
+updateLens(); dump();
+</script>
+</body>
+</html>

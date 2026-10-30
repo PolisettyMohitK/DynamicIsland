@@ -1,0 +1,77 @@
+/* Every colour, size and timing of the island lives here. Restyle from this file. */
+:root {
+  /* Surface: dark liquid glass (tuned in static/glass-lab) */
+  --glass-refraction: 19; /* lens strength at the rim */
+  --glass-bezel: 60; /* how far in from the edge the lens bends, px */
+  --glass-dispersion: 0.07; /* colour fringing in the lens */
+  --glass-blur: 3; /* px */
+  --glass-tint: #000000;
+  --glass-tint-alpha: 0.66;
+  --glass-saturation: 2;
+  --glass-brightness: 0.68;
+  --glass-specular: 0.29; /* rim highlight strength */
+  --glass-rim: 1.5px;
+  --glass-light: 10deg; /* direction the rim is lit from */
+  --glass-sheen: 0.21;
+  --glass-shadow: 1;
+
+  /* Text */
+  --text: #ffffff;
+  --text-dim: rgba(255, 255, 255, 0.58);
+  --text-faint: rgba(255, 255, 255, 0.34);
+  --font: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
+
+  /* Layout: everything sits on a 4px grid inside a 40px page margin */
+  --edge: 40px;
+
+  /* Controls */
+  --pill: rgba(255, 255, 255, 0.08);
+  --pill-hover: rgba(255, 255, 255, 0.15);
+  --hairline: rgba(255, 255, 255, 0.09);
+  --track: rgba(255, 255, 255, 0.14);
+  --dot: rgba(255, 255, 255, 0.28);
+
+  /* Accents: soft and a little muted, so nothing shouts */
+  --accent-music: #c4b0f0;
+  --accent-focus: #f2897c;
+  --accent-water: #7db8f0;
+  --accent-shelf: #d0d0d6;
+  --accent-todo: #f0bf7f;
+  --ok: #7fd49a;
+  --bad: #f2897c;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Small overshoot for buttons and toggles, so they feel springy */
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --morph-grow: 260ms;
+  --morph-shrink: 180ms;
+}
+
+/* Mono: one quiet colour for everything (Settings > Look). */
+:root[data-colour='mono'] {
+  --accent-music: #e4e4ea;
+  --accent-focus: #e4e4ea;
+  --accent-water: #e4e4ea;
+  --accent-todo: #e4e4ea;
+  --ok: #e4e4ea;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--text);
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
