@@ -51,7 +51,7 @@
     transform: scale(1.04);
   }
   button:active {
-    transform: scale(0.93);
+    transform: scale(0.96);
     transition-duration: 80ms;
   }
   button.active {

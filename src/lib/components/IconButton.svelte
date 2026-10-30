@@ -67,7 +67,7 @@
     transform: scale(1.06);
   }
   button:active {
-    transform: scale(0.9);
+    transform: scale(0.96);
     transition-duration: 80ms;
   }
   .quiet {
@@ -105,7 +105,7 @@
   }
   @keyframes pop {
     from {
-      transform: scale(0.6);
+      transform: scale(0.9);
       opacity: 0;
     }
   }

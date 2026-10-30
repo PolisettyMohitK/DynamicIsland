@@ -49,7 +49,7 @@ Implementation notes:
 - Date regular, time bold.
 - Audio-bars icon on the right shows music is playing (static when paused).
 
-Navigation: `‹` and `›` circular buttons on the left/right edges, page dots centred at the bottom (active dot is a wider pill). Scroll wheel and swipe also switch pages.
+Navigation: `‹` and `›` circular buttons on the left/right edges, page dots centred at the bottom (active dot is a wider pill). Sideways scroll (or Shift + wheel) also switches pages; scrolling down opens the Control Centre (§4g).
 
 ## 3. Pages
 
@@ -106,6 +106,18 @@ Navigation: `‹` and `›` circular buttons on the left/right edges, page dots 
 
 - Short facts about you, one per line in `choco_memory.txt` in the app's config folder (`src-tauri/src/memory.rs`). Both models read them every time and can `remember` new ones; the voice brain can also `forget` one. Up to 60, oldest dropped first. Editable by hand.
 - Say "remember that…", "what do you know about me?", "forget that…". Choco also saves lasting preferences it notices (the apps you use, your name). Never passwords, codes or payment details.
+
+## 4g. Control Centre
+
+- **Open**: scroll down on the island (hovered or expanded). Scroll up goes back to the pages; the cursor leaving collapses it after the usual 1s hold.
+- **Controls**: tiles for Wi-Fi, Bluetooth and the output device (a list to pick from), dark mode and mute; volume and brightness sliders (brightness only on built-in panels); now playing. A switch's state lives in its round icon, lit white when on.
+- **Today**: the date, open to-dos (tick them off), focus timer and water from the existing stores.
+- **Wallpaper**: `Pictures\Wallpapers` then the Windows ones, two rows that scroll sideways; click to set. "Add your own" opens the folder. Thumbnails are shrunk with WIC in `wallpaper.rs`.
+- **Stats**: CPU, GPU, RAM and VRAM rings, the apps using the most memory, disk, network rate, uptime. Sampled once a second only while the tab is open (`stats.rs`: sysinfo, PDH GPU counters like Task Manager's, DXGI for the GPU name).
+- **Clipboard**: the last 30 texts copied, in memory only; skips anything its app marks private (password managers). Click one to paste it into the app in use (`clipboard.rs`).
+- **Apps**: search the Start menu (`Get-StartApps`, read once), Enter opens the top hit; recent apps when the search is empty (`apps.rs`).
+- **Power**: lock, sleep, sign out, restart, shut down. The last three need a second click within 3s.
+- **How** (`src-tauri/src/control.rs`): WinRT radios, the Personalize registry keys plus a `WM_SETTINGCHANGE` broadcast, WMI brightness, the undocumented `IPolicyConfig` for the default output (what EarTrumpet uses), `shutdown.exe`. State is read when it opens; nothing polls.
 
 ## 5. Build order
 

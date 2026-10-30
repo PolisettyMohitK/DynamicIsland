@@ -10,6 +10,11 @@ mod ask;
 mod capture;
 mod computer;
 mod dashboard;
+mod control;
+mod stats;
+mod apps;
+mod clipboard;
+mod wallpaper;
 mod game;
 mod island;
 mod choco;
@@ -58,6 +63,7 @@ pub fn run() {
             game::spawn(app.handle().clone());
             let quiet = std::env::args().any(|a| a == dashboard::QUIET_START);
             dashboard::create(app.handle(), !quiet)?;
+            clipboard::start(app.handle().clone());
 
             let open = MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Hide island", true, None::<&str>)?;
@@ -107,6 +113,23 @@ pub fn run() {
             computer::computer_run,
             computer::computer_stop,
             computer::computer_answer,
+            control::control_state,
+            control::control_set_radio,
+            control::control_set_dark,
+            control::control_set_brightness,
+            control::control_set_output,
+            control::control_power,
+            stats::stats_read,
+            stats::stats_stop,
+            apps::apps_list,
+            apps::apps_launch,
+            clipboard::clipboard_history,
+            clipboard::clipboard_clear,
+            clipboard::clipboard_paste,
+            wallpaper::wallpaper_list,
+            wallpaper::wallpaper_thumb,
+            wallpaper::wallpaper_set,
+            wallpaper::wallpaper_open_folder,
             pet::pet_configure,
             pet::pet_config,
             pet::pet_wake,

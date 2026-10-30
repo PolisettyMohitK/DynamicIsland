@@ -1,6 +1,6 @@
 // Lens maps for the liquid glass. A map is an image the size of the island
 // window whose red/green channels tell feDisplacementMap how far to shift each
-// pixel. Near the island's left, right and bottom edges, pixels sample from
+// pixel. Near every edge of the island, pixels sample from
 // further inside, which bends the background like the rim of a thick glass slab.
 
 export type Shape = { w: number; h: number; r: number };
@@ -13,9 +13,14 @@ export function readGlassSettings(): GlassSettings {
   return { refraction: num('refraction'), bezel: num('bezel'), dispersion: num('dispersion'), blur: num('blur') };
 }
 
-/** Map for `shape` top-centred in a `winW`×`winH` window. Outside the shape the map is neutral. */
+/** Gap between the top of the screen and the floating island, logical px. */
+export const ISLAND_TOP = 8;
+
+/** Map for `shape` centred, ISLAND_TOP down, in a `winW`×`winH` window. Outside the shape the
+    map is neutral. Every edge bends: the island floats, so it's glass all the way round. */
 export function makeLensMap(winW: number, winH: number, shape: Shape, bezel: number): string {
-  const { w, h, r } = shape;
+  const { w, h } = shape;
+  const r = Math.min(shape.r, w / 2, h / 2);
   const canvas = document.createElement('canvas');
   canvas.width = winW;
   canvas.height = winH;
@@ -30,29 +35,28 @@ export function makeLensMap(winW: number, winH: number, shape: Shape, bezel: num
       px[i] = px[i + 1] = px[i + 2] = 128;
       px[i + 3] = 255;
 
-      const X = x + 0.5 - left;
-      const Y = y + 0.5;
-      if (X < 0 || X > w || Y > h) continue;
+      // Position from the shape's centre, folded into one quadrant.
+      const X = x + 0.5 - left - w / 2;
+      const Y = y + 0.5 - ISLAND_TOP - h / 2;
+      const qx = Math.abs(X) - (w / 2 - r);
+      const qy = Math.abs(Y) - (h / 2 - r);
 
       let d: number;
       let nx = 0;
       let ny = 0;
-      if (Y > h - r && (X < r || X > w - r)) {
-        // rounded bottom corner
-        const cx = X < r ? r : w - r;
-        const dx = X - cx;
-        const dy = Y - (h - r);
-        const len = Math.hypot(dx, dy) || 1;
+      if (qx > 0 && qy > 0) {
+        // rounded corner
+        const len = Math.hypot(qx, qy);
         if (len > r) continue;
         d = r - len;
-        nx = dx / len;
-        ny = dy / len;
+        nx = (qx / len) * Math.sign(X);
+        ny = (qy / len) * Math.sign(Y);
       } else {
-        // straight edge; the top edge sits against the screen and isn't bent
-        d = Math.min(X, w - X, h - Y);
-        if (d === X) nx = -1;
-        else if (d === w - X) nx = 1;
-        else ny = 1;
+        // straight edge
+        d = r - Math.max(qx, qy);
+        if (d < 0) continue;
+        if (qx > qy) nx = Math.sign(X);
+        else ny = Math.sign(Y);
       }
       if (d >= bezel) continue;
 
