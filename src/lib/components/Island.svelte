@@ -17,11 +17,12 @@
   import { todos } from '$lib/todos.svelte';
   import { ui } from '$lib/ui.svelte';
   import { water } from '$lib/water.svelte';
-  import type { Shape } from '$lib/glass';
+  import { ISLAND_TOP, type Shape } from '$lib/glass';
   import Answer from './Answer.svelte';
   import Bars from './Bars.svelte';
   import BatteryRing from './BatteryRing.svelte';
   import ChocoFace, { type Mood } from './ChocoFace.svelte';
+  import Digits from './Digits.svelte';
   import Glass from './Glass.svelte';
   import Icon from './Icon.svelte';
   import IconButton from './IconButton.svelte';
@@ -53,6 +54,8 @@
   };
   /** The resting pill while the pet is out on the desktop: its empty bed. */
   const AWAY: Shape = { w: 64, h: 22, r: 11 };
+  /** The resting pill while Choco sleeps in it: the time on its left, the day on its right. */
+  const SLEEPING: Shape = { w: 184, h: 32, r: 16 };
   const SETTINGS_W = 720;
   // Short answers sit in a narrower island than long ones or ones with a card.
   const ANSWER_W = 460;
@@ -74,6 +77,8 @@
   const SHELF_PAGE = 3;
   // How often due tasks and water reminders are checked.
   const REMINDER_EVERY = 20_000;
+  /** How long an open island waits after the cursor leaves. */
+  const LEAVE_HOLD = 1000;
 
   let mode = $state<Mode>('idle');
   let page = $state(0);
@@ -95,6 +100,13 @@
   const answerW = $derived(
     choco.reply?.panel || (choco.reply?.text.length ?? 0) > LONG_ANSWER ? ANSWER_WIDE_W : ANSWER_W,
   );
+  /** Choco in the resting pill: asleep at night, when switched off or when the pet is home
+      (the island is its bed), bobbing to music. */
+  const idleMood = $derived.by<Mood>(() => {
+    void mode; // checked again whenever the island changes
+    if (pet.settings.enabled || !choco.settings.enabled || isNight()) return 'sleep';
+    return nowPlaying.media?.playing ? 'vibe' : 'idle';
+  });
   const fit = (h: number) => Math.ceil(h / HEIGHT_STEP) * HEIGHT_STEP;
   const shape = $derived<Shape>(
     mode === 'expanded' && wide
@@ -105,7 +117,9 @@
           ? { w: SETTINGS_W, h: fit(Math.max(180, settingsH)), r: 32 }
           : mode === 'idle' && petOut
             ? AWAY
-            : SHAPES[mode],
+            : mode === 'idle' && idleMood === 'sleep'
+              ? SLEEPING
+              : SHAPES[mode],
   );
   const voice = $derived(mode === 'voice' || mode === 'work' || mode === 'answer');
   const grow = $derived(mode === 'expanded' || mode === 'settings' || mode === 'popup' || mode === 'live' || voice);
@@ -115,13 +129,6 @@
   const liveTimer = $derived(focus.running);
   const glowColour = $derived(liveTimer && mode === 'live' ? TIMER_GLOW : nowPlaying.colour);
   const glow = $derived(glowColour !== null && ((mode === 'expanded' && wide) || mode === 'live'));
-  /** Choco in the resting pill: asleep at night, when switched off or when the pet is home
-      (the island is its bed), bobbing to music. */
-  const idleMood = $derived.by<Mood>(() => {
-    void mode; // checked again whenever the island changes
-    if (pet.settings.enabled || !choco.settings.enabled || isNight()) return 'sleep';
-    return nowPlaying.media?.playing ? 'vibe' : 'idle';
-  });
   const liveText = $derived.by(() => {
     if (liveTimer) return LABEL[focus.kind];
     const m = nowPlaying.media;
@@ -131,8 +138,19 @@
   });
   const now = $derived(new Date(clock.now));
   const date = $derived(now.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }));
+  const day = $derived(now.toLocaleDateString('en-GB', { weekday: 'short' }));
   const time = $derived(now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }));
   const current = $derived(PAGES[page]);
+
+  /** iOS-style arrival: content comes into focus out of the glass rather than just fading. */
+  function materialise(_: Element, { duration = 200, delay = 0 } = {}) {
+    return {
+      duration,
+      delay,
+      easing: cubicOut,
+      css: (t: number) => `opacity: ${t}; filter: blur(${(1 - t) * 4}px); scale: ${0.96 + 0.04 * t}`,
+    };
+  }
 
   function isNight() {
     const hour = new Date().getHours();
@@ -172,6 +190,11 @@
       choco.hold(true);
       return;
     }
+    // Back in during the leave grace: stay open.
+    if (mode === 'expanded' || mode === 'settings') {
+      play();
+      return;
+    }
     // The backend polls hover every 30ms, so these land close to Nusa's ~100ms / ~330ms.
     play(['peek', 50], ['expanded', 290]);
   }
@@ -186,7 +209,10 @@
       const p = missed;
       missed = null;
       showPopup(p);
-    } else if (mode === 'expanded' || mode === 'settings' || mode === 'popup') play(['peek', 0], ['rest', 120]);
+    } else if (mode === 'expanded' || mode === 'settings')
+      // A slip of the cursor shouldn't close it: hold a moment before collapsing.
+      play(['peek', LEAVE_HOLD], ['rest', LEAVE_HOLD + 120]);
+    else if (mode === 'popup') play(['peek', 0], ['rest', 120]);
     else play(['rest', 0]);
   }
 
@@ -225,13 +251,24 @@
 
   // Tell the backend where the island is so clicks elsewhere pass through to the desktop.
   $effect(() => {
-    invoke('set_hit_size', { width: shape.w, height: shape.h });
+    invoke('set_hit_size', { width: shape.w, height: ISLAND_TOP + shape.h });
   });
 
-  // The clock only ticks while it can be seen, so the idle island does no work.
+  // The clock ticks twice a second while the island is open; resting, it only wakes on the
+  // minute for the sleeping pill's clock.
   $effect(() => {
-    if (mode === 'idle') return;
     clock.now = Date.now();
+    if (mode === 'idle') {
+      let id: ReturnType<typeof setTimeout>;
+      const next = () => {
+        id = setTimeout(() => {
+          clock.now = Date.now();
+          next();
+        }, 60_000 - (Date.now() % 60_000) + 20);
+      };
+      next();
+      return () => clearTimeout(id);
+    }
     const id = setInterval(() => (clock.now = Date.now()), 500);
     return () => clearInterval(id);
   });
@@ -344,24 +381,30 @@
     {shape}
     active
     frameMs={mode === 'idle' ? 1000 : mode === 'live' || mode === 'work' ? 100 : 33}
-    prewarm={[AWAY, SHAPES.peek, SHAPES.expanded, SHAPES.wide, SHAPES.live, SHAPES.popup, SHAPES.voice, SHAPES.work]}
+    prewarm={[AWAY, SLEEPING, SHAPES.peek, SHAPES.expanded, SHAPES.wide, SHAPES.live, SHAPES.popup, SHAPES.voice, SHAPES.work]}
   />
   <div class="glow" class:on={glow} style="--album: {glowColour ?? '255 255 255'}"></div>
 
   {#if mode === 'idle' && petOut}
     <!-- Its bed, empty while it's out. -->
   {:else if mode === 'idle'}
-    <div class="layer pet" in:fade={{ duration: 200, delay: 100 }} out:fade={{ duration: 80 }}>
-      <ChocoFace mood={idleMood} size={21} />
+    <div class="layer pet" class:sleeping={idleMood === 'sleep'} in:materialise={{ duration: 200, delay: 100 }} out:fade={{ duration: 80 }}>
+      {#if idleMood === 'sleep'}
+        <span class="clock"><Digits value={time} /></span>
+        <ChocoFace mood={idleMood} size={21} />
+        <span class="day">{day}</span>
+      {:else}
+        <ChocoFace mood={idleMood} size={21} />
+      {/if}
     </div>
   {:else if mode === 'peek'}
-    <div class="layer peek" in:fade={{ duration: 120 }} out:fade={{ duration: 80 }}>
+    <div class="layer peek" in:materialise={{ duration: 120 }} out:fade={{ duration: 80 }}>
       <BatteryRing />
       <span class="time">{time}</span>
       <Bars playing={!!nowPlaying.media?.playing} colour={nowPlaying.colour ? `rgb(${nowPlaying.colour})` : 'var(--text-dim)'} size={13} />
     </div>
   {:else if mode === 'expanded'}
-    <div class="layer expanded" in:fade={{ duration: 160, delay: 90 }} out:fade={{ duration: 80 }}>
+    <div class="layer expanded" in:materialise={{ duration: 160, delay: 90 }} out:fade={{ duration: 80 }}>
       {#if wide}
         <div class="panel wide" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
           <LyricsView onLyrics={toggleLyrics} />
@@ -418,7 +461,7 @@
       {/if}
     </div>
   {:else if mode === 'live'}
-    <div class="layer live" class:timer={liveTimer} in:fade={{ duration: 160, delay: 80 }} out:fade={{ duration: 80 }}>
+    <div class="layer live" class:timer={liveTimer} in:materialise={{ duration: 160, delay: 80 }} out:fade={{ duration: 80 }}>
       <span class="note-icon" class:timer={liveTimer}>
         {#if liveTimer}<Icon name="timer" size={15} />{:else}<Bars playing colour={glowColour ? `rgb(${glowColour})` : 'var(--text)'} size={13} />{/if}
       </span>
@@ -430,12 +473,12 @@
       {/if}
     </div>
   {:else if mode === 'settings'}
-    <div class="layer" bind:offsetHeight={settingsH} in:fade={{ duration: 180, delay: 100 }} out:fade={{ duration: 80 }}>
+    <div class="layer" bind:offsetHeight={settingsH} in:materialise={{ duration: 180, delay: 100 }} out:fade={{ duration: 80 }}>
       <Settings {lyricsOn} onLyrics={toggleLyrics} onclose={() => play(['expanded', 0])} />
     </div>
   {:else if mode === 'voice'}
     {@const thinking = choco.state === 'thinking'}
-    <div class="layer voice" in:fade={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
+    <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
       <ChocoFace mood={thinking ? 'think' : 'alert'} size={17} level={thinking ? 0 : choco.level} />
       <Wave level={choco.level} {thinking} bars={18} />
       {#key choco.heard}
@@ -446,7 +489,7 @@
     </div>
   {:else if mode === 'work'}
     <!-- Working the desktop: what it's doing, or a Yes / No before anything risky. -->
-    <div class="layer work" in:fade={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
+    <div class="layer work" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
       <ChocoFace mood={choco.question ? 'alert' : 'think'} size={17} />
       {#key choco.question ?? choco.step}
         <span class="said" class:asking={choco.question} in:fade={{ duration: 220 }}>{choco.question ?? choco.step}</span>
@@ -459,7 +502,7 @@
       {/if}
     </div>
   {:else if mode === 'answer' && choco.reply}
-    <div class="layer" bind:offsetHeight={answerH} in:fade={{ duration: 160, delay: 110 }} out:fade={{ duration: 100 }}>
+    <div class="layer" bind:offsetHeight={answerH} in:materialise={{ duration: 160, delay: 110 }} out:fade={{ duration: 100 }}>
       {#key choco.reply}
         <Answer
           reply={choco.reply}
@@ -472,7 +515,7 @@
       {/key}
     </div>
   {:else if mode === 'popup'}
-    <div class="layer popup" in:fade={{ duration: 120, delay: 60 }} out:fade={{ duration: 80 }}>
+    <div class="layer popup" in:materialise={{ duration: 120, delay: 60 }} out:fade={{ duration: 80 }}>
       {#key popup}
         <span class="popup-icon" style="--accent: {popup.accent ?? 'var(--text)'}"><Icon name={popup.icon} size={15} /></span>
       {/key}
@@ -490,15 +533,17 @@
 <style>
   .island {
     position: absolute;
-    top: 0;
+    top: var(--island-top);
     left: 50%;
     transform: translateX(-50%);
     width: var(--w);
     height: var(--h);
-    border-radius: 0 0 var(--r) var(--r);
+    border-radius: var(--r);
+    /* A tight contact shadow and a wide soft one lift it off the desktop. */
     box-shadow:
-      0 18px 50px rgba(0, 0, 0, var(--glass-shadow)),
-      0 2px 6px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.6));
+      0 1px 2px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.5)),
+      0 6px 14px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.35)),
+      0 18px 50px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.7));
     overflow: hidden;
     isolation: isolate;
     transition-property: width, height, border-radius, box-shadow;
@@ -507,10 +552,13 @@
   }
   .island.grow {
     transition-duration: var(--morph-grow);
+    transition-timing-function: var(--spring-morph);
   }
-  /* The resting tab is a sliver; a deep shadow under it would look like a smudge. */
+  /* The resting pill is small; a deep shadow under it would look like a smudge. */
   .island.idle {
-    box-shadow: none;
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.5)),
+      0 4px 10px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.3));
   }
 
   /* Each state's content keeps its final size and is clipped by the morphing shape,
@@ -618,7 +666,7 @@
     color: var(--text);
     cursor: pointer;
     opacity: 0;
-    transform: scale(0.7);
+    transform: scale(0.9);
     transition:
       opacity 180ms,
       transform 260ms var(--spring),
@@ -632,7 +680,7 @@
     background: var(--pill-hover);
   }
   .nav:active {
-    transform: scale(0.88);
+    transform: scale(0.96);
   }
 
   .body,
@@ -697,7 +745,7 @@
   }
   @keyframes pop {
     from {
-      transform: scale(0.5);
+      transform: scale(0.9);
       opacity: 0;
     }
   }
@@ -757,6 +805,38 @@
     display: grid;
     place-items: center;
     padding-top: 1px;
+  }
+  .pet.sleeping {
+    width: 184px;
+    height: 32px;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 12px;
+    padding: 1px 16px 0;
+  }
+  .clock,
+  .day {
+    font-size: 13px;
+    letter-spacing: -0.1px;
+    animation: wake-in 600ms var(--ease-out) both;
+  }
+  .clock {
+    justify-self: start;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .day {
+    justify-self: end;
+    font-weight: 500;
+    color: var(--text-dim);
+    animation-delay: 60ms;
+  }
+  /* The words surface out of the glass as the pill settles. */
+  @keyframes wake-in {
+    from {
+      opacity: 0;
+      filter: blur(4px);
+      transform: scale(0.94);
+    }
   }
 
   /* Listening: Choco's ears up and your voice as a soft wave. */

@@ -1,16 +1,17 @@
 /* Every colour, size and timing of the island lives here. Restyle from this file. */
 :root {
   /* Surface: dark liquid glass (tuned in static/glass-lab) */
-  --glass-refraction: 19; /* lens strength at the rim */
-  --glass-bezel: 60; /* how far in from the edge the lens bends, px */
-  --glass-dispersion: 0.07; /* colour fringing in the lens */
-  --glass-blur: 3; /* px */
+  --glass-refraction: 30; /* lens strength at the rim */
+  --glass-bezel: 28; /* how far in from the edge the lens bends, px */
+  --glass-dispersion: 0.12; /* colour fringing in the lens */
+  --glass-blur: 6; /* px */
   --glass-tint: #000000;
-  --glass-tint-alpha: 0.66;
-  --glass-saturation: 2;
-  --glass-brightness: 0.68;
-  --glass-specular: 0.29; /* rim highlight strength */
-  --glass-rim: 1.5px;
+  --glass-tint-alpha: 0.45;
+  --glass-saturation: 1.6;
+  --glass-brightness: 0.8;
+  --glass-specular: 0.42; /* rim highlight strength */
+  --glass-rim: 1px;
+  --glass-thickness: 10px; /* soft inner glow along every edge */
   --glass-light: 10deg; /* direction the rim is lit from */
   --glass-sheen: 0.21;
   --glass-shadow: 1;
@@ -45,8 +46,13 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   /* Small overshoot for buttons and toggles, so they feel springy */
   --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --morph-grow: 260ms;
-  --morph-shrink: 180ms;
+  /* Spring (duration 0.5s, bounce 0.18) sampled into a curve, so the morph overshoots ~1% and
+     settles like iOS while still running as a plain CSS transition. */
+  --spring-morph: linear(0, 0.021, 0.074, 0.147, 0.232, 0.321, 0.411, 0.497, 0.577, 0.649, 0.714, 0.77, 0.819, 0.86, 0.895, 0.923, 0.946, 0.964, 0.978, 0.989, 0.997, 1.003, 1.007, 1.009, 1.01, 1.011, 1.011, 1.011, 1.01, 1.009, 1.008, 1.007, 1);
+  --morph-grow: 550ms;
+  --morph-shrink: 200ms;
+  /* The island floats this far below the top of the screen. Matches ISLAND_TOP in glass.ts. */
+  --island-top: 8px;
 }
 
 /* Mono: one quiet colour for everything (Settings > Look). */
@@ -74,4 +80,15 @@ body {
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Windows "Animation effects" off: no CSS movement. Svelte fades still play. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
 }
