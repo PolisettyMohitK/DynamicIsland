@@ -9,8 +9,10 @@
   import AppsTab from './cc/AppsTab.svelte';
   import ClipboardTab from './cc/ClipboardTab.svelte';
   import StatsTab from './cc/StatsTab.svelte';
+  import TodayTab from './cc/TodayTab.svelte';
+  import WallpaperTab from './cc/WallpaperTab.svelte';
 
-  const TABS = ['Controls', 'Stats', 'Clipboard', 'Apps', 'Power'] as const;
+  const TABS = ['Controls', 'Today', 'Stats', 'Clipboard', 'Apps', 'Wallpaper', 'Power'] as const;
   const POWER: { action: PowerAction; label: string; icon: IconName; confirm?: boolean }[] = [
     { action: 'lock', label: 'Lock', icon: 'lock' },
     { action: 'sleep', label: 'Sleep', icon: 'moon' },
@@ -147,6 +149,10 @@
         {/if}
       {/if}
     </div>
+  {:else if tab === 'Today'}
+    <div class="body" in:fade={{ duration: 160 }}><TodayTab /></div>
+  {:else if tab === 'Wallpaper'}
+    <div class="body" in:fade={{ duration: 160 }}><WallpaperTab /></div>
   {:else if tab === 'Stats'}
     <div class="body" in:fade={{ duration: 160 }}><StatsTab /></div>
   {:else if tab === 'Clipboard'}

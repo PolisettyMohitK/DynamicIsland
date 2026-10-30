@@ -39,6 +39,8 @@ windows = { version = "0.61", features = [
   "Networking_Connectivity",
   "Storage_Streams",
   "Win32_Devices_FunctionDiscovery",
+  "Win32_Foundation",
+  "Win32_Graphics_Imaging",
   "Win32_Graphics_Dxgi",
   "Win32_Media_Audio",
   "Win32_Media_Audio_Endpoints",

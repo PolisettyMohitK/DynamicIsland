@@ -12,6 +12,7 @@ mod control;
 mod stats;
 mod apps;
 mod clipboard;
+mod wallpaper;
 mod game;
 mod island;
 mod choco;
@@ -101,6 +102,10 @@ pub fn run() {
             clipboard::clipboard_history,
             clipboard::clipboard_clear,
             clipboard::clipboard_paste,
+            wallpaper::wallpaper_list,
+            wallpaper::wallpaper_thumb,
+            wallpaper::wallpaper_set,
+            wallpaper::wallpaper_open_folder,
             pet::pet_configure,
             pet::pet_config,
             pet::pet_wake,

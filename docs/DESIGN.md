@@ -111,6 +111,8 @@ Navigation: `‹` and `›` circular buttons on the left/right edges, page dots 
 
 - **Open**: scroll down on the island (hovered or expanded). Scroll up goes back to the pages; the cursor leaving collapses it after the usual 1s hold.
 - **Controls**: tiles for Wi-Fi, Bluetooth and the output device (a list to pick from), dark mode and mute; volume and brightness sliders (brightness only on built-in panels); now playing. A switch's state lives in its round icon, lit white when on.
+- **Today**: the date, open to-dos (tick them off), focus timer and water from the existing stores.
+- **Wallpaper**: `Pictures\Wallpapers` then the Windows ones, two rows that scroll sideways; click to set. "Add your own" opens the folder. Thumbnails are shrunk with WIC in `wallpaper.rs`.
 - **Stats**: CPU, GPU, RAM and VRAM rings, the apps using the most memory, disk, network rate, uptime. Sampled once a second only while the tab is open (`stats.rs`: sysinfo, PDH GPU counters like Task Manager's, DXGI for the GPU name).
 - **Clipboard**: the last 30 texts copied, in memory only; skips anything its app marks private (password managers). Click one to paste it into the app in use (`clipboard.rs`).
 - **Apps**: search the Start menu (`Get-StartApps`, read once), Enter opens the top hit; recent apps when the search is empty (`apps.rs`).
