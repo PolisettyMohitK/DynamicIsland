@@ -8,6 +8,8 @@ export type Kind = 'focus' | 'break';
 /** Session lengths in ms; changed in Settings. */
 export const LENGTH = $state<Record<Kind, number>>(load('focusLengths', { focus: 25 * 60_000, break: 5 * 60_000 }));
 export const LABEL: Record<Kind, string> = { focus: 'Focus time', break: 'Short break' };
+/** Allowed session lengths in minutes: [min, max]. */
+const RANGE: Record<Kind, [number, number]> = { focus: [5, 90], break: [1, 30] };
 
 type Saved = { kind: Kind; endAt: number | null; left: number };
 
@@ -71,7 +73,8 @@ class Focus {
 
   /** Settings: new length in minutes. A paused session of that kind starts over at the new length. */
   setLength(kind: Kind, minutes: number) {
-    LENGTH[kind] = minutes * 60_000;
+    const [min, max] = RANGE[kind];
+    LENGTH[kind] = Math.min(max, Math.max(min, minutes)) * 60_000;
     save('focusLengths', LENGTH);
     if (kind === this.kind && !this.running) this.left = LENGTH[kind];
     this.#save();

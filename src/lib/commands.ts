@@ -1,5 +1,5 @@
 // What Choco does with a sentence. Plain commands are matched here, offline and instantly;
-// anything else goes to DeepSeek (via OpenCode), which answers and may call the same actions.
+// anything else goes to the AI service in use (ai.rs), which answers and may call the same actions.
 import { invoke } from '@tauri-apps/api/core';
 import { focus, LABEL } from './focus.svelte';
 import { nowPlaying } from './media.svelte';
@@ -171,7 +171,7 @@ export async function handle(heard: string, history: Turn[], session: string): P
     return { text, panel: done.findLast((d) => d.panel)?.panel };
   } catch (e) {
     const msg = String(e);
-    if (msg === 'no-key') return { text: 'I can only do the basics until there’s an OpenCode key in Settings.', tone: 'bad' };
+    if (msg === 'no-key') return { text: 'I can only do the basics until there’s an AI key in Settings.', tone: 'bad' };
     if (msg.startsWith('network')) return { text: 'I can’t reach the internet right now.', tone: 'bad' };
     return { text: msg, tone: 'bad' };
   }

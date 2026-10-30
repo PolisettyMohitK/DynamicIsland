@@ -9,12 +9,19 @@ export const ui = $state({
   /** A text field has the keyboard; the island stays open until it's done. */
   typing: false,
   colour: load<Colour>('colour', 'soft'),
+  /** Lyrics in the live bar and beside Now Playing. */
+  lyricsOn: load('lyricsOn', false),
 });
 
 export function setColour(c: Colour) {
   ui.colour = c;
   save('colour', c);
   document.documentElement.dataset.colour = c;
+}
+
+export function setLyrics(on: boolean) {
+  ui.lyricsOn = on;
+  save('lyricsOn', on);
 }
 
 /** The island window normally never takes focus. Let it while a field is in use. */

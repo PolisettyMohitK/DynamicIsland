@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main", "pet"],
+  "description": "Capability for the island, pet and dashboard windows",
+  "windows": ["main", "pet", "dashboard"],
   "permissions": [
     "core:default",
+    "core:window:allow-minimize",
     "opener:default",
     "autostart:default"
   ]

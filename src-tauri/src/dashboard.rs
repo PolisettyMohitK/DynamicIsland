@@ -1,0 +1,47 @@
+//! The dashboard: a plain window with every setting (src/routes/dashboard). It opens when you
+//! launch the app, but not when it starts with Windows. Closing it only hides it; the island
+//! keeps running, and launching the app again or the tray brings it back.
+
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+const LABEL: &str = "dashboard";
+/// Passed by the Windows autostart entry, so logging in doesn't open the dashboard.
+pub const QUIET_START: &str = "--minimized";
+
+pub fn create(app: &AppHandle, visible: bool) -> tauri::Result<()> {
+    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("dashboard".into()))
+        .title("Dynamic Island")
+        .inner_size(760.0, 620.0)
+        .min_inner_size(400.0, 360.0)
+        .center()
+        .visible(false)
+        .build()?;
+    let handle = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = handle.hide();
+        }
+    });
+    if visible {
+        show(app);
+    }
+    Ok(())
+}
+
+/// Brings the dashboard up in front of everything. Windows won't hand focus to a background
+/// process on request, so it's briefly made topmost to get above whatever is in front.
+pub fn show(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(LABEL) {
+        let _ = window.show();
+        // Windows swaps a process's first show for the way it was started, and the installer's
+        // "Run Dynamic Island" starts it hidden; so if that one didn't take, show it again.
+        if !window.is_visible().unwrap_or(true) {
+            let _ = window.show();
+        }
+        let _ = window.unminimize();
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+        let _ = window.set_always_on_top(false);
+    }
+}

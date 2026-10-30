@@ -42,6 +42,7 @@
 
   let motion = $state<Motion>('rest');
   let facing = $state(1);
+  let slope = $state(0);
   let pose = $state<Pose>('stand');
   let trick = $state<Act>('none');
   let petted = $state(false);
@@ -60,11 +61,12 @@
   $effect(() => {
     invoke<Config>('pet_config').then((c) => (config = c));
     const offs = [
-      listen<{ motion: Motion; facing: number }>('pet-motion', (e) => {
+      listen<{ motion: Motion; facing: number; slope: number }>('pet-motion', (e) => {
         // Pulling up from a run: a little skid.
         if (e.payload.motion === 'rest' && motion === 'run') play('skid');
         motion = e.payload.motion;
         facing = e.payload.facing;
+        slope = e.payload.slope;
       }),
       listen<Config>('pet-config', (e) => (config = e.payload)),
       listen<Mood>('pet-mood', (e) => (mood = e.payload)),
@@ -183,7 +185,7 @@
   {/key}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="dog" style="transform: scaleX({facing})" onclick={click} ondblclick={home}>
-    <Dog {pose} {act} />
+    <Dog {pose} {act} {slope} />
   </div>
 </main>
 

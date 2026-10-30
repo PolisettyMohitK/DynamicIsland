@@ -23,6 +23,7 @@ drag = "2"
 cpal = "0.15"
 ort = "=2.0.0-rc.15"
 tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 png = "0.18"
 base64 = "0.22"
 
@@ -54,6 +55,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Gdi",
+  "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

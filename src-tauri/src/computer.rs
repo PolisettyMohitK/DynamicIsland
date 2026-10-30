@@ -1,6 +1,8 @@
 //! Computer use: Choco works the desktop for a spoken task ("open Spotify and play lofi").
-//! Claude Haiku 5.5 through OpenCode Go looks at screenshots and asks for clicks, typing and
-//! keys; this runs them. Before anything risky (sending, buying, deleting, posting, passwords)
+//! The AI service in use (ai.rs) looks at screenshots and asks for clicks, typing and keys;
+//! this runs them. Through OpenCode Go that's Claude with Anthropic's computer tool; OpenAI and
+//! Gemini get the same actions as function tools. Before anything risky (sending, buying,
+//! deleting, posting, passwords)
 //! it must ask the user, which the island shows as Yes / No. Esc, "stop" or a game starting
 //! ends the task.
 //!
@@ -15,8 +17,12 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::oneshot;
 
-const URL: &str = "https://opencode.ai/inference/go/anthropic/v1/messages";
-const MODEL: &str = "claude-haiku-5-5";
+use crate::ai::{Job, Provider};
+use crate::ask::tool;
+
+const CLAUDE_URL: &str = "https://opencode.ai/inference/go/anthropic/v1/messages";
+/// Screenshots kept in an OpenAI / Gemini conversation; older ones are dropped.
+const KEEP_SHOTS: usize = 2;
 /// Screenshots go out this wide (the height keeps the screen's shape); the model's
 /// coordinates are in screenshot pixels.
 const SHOT_W: i32 = 1280;
@@ -55,18 +61,20 @@ lists) saying what you did.\n\n{}",
     )
 }
 
-fn tools() -> Value {
+const ASK_USER: &str = "Ask the user a yes/no question and wait for the answer. Required before \
+sending, buying or paying, deleting, posting or publishing, or accepting terms.";
+const QUESTION: &str = "Under 12 words, e.g. \"Send this email to Sam?\"";
+
+/// Anthropic's format, with its built-in computer tool.
+fn claude_tools() -> Value {
     json!([
         { "type": "computer_toolset_20260801" },
         {
             "name": "ask_user",
-            "description": "Ask the user a yes/no question and wait for the answer. Required before \
-sending, buying or paying, deleting, posting or publishing, or accepting terms.",
+            "description": ASK_USER,
             "input_schema": {
                 "type": "object",
-                "properties": {
-                    "question": { "type": "string", "description": "Under 12 words, e.g. \"Send this email to Sam?\"" }
-                },
+                "properties": { "question": { "type": "string", "description": QUESTION } },
                 "required": ["question"],
             },
         },
@@ -79,6 +87,46 @@ sending, buying or paying, deleting, posting or publishing, or accepting terms."
                 "required": ["fact"],
             },
         },
+    ])
+}
+
+/// OpenAI's format: the computer tool's actions (what `input::act` runs), one function each.
+fn chat_tools() -> Value {
+    let point = |what: &str| json!({ "type": "array", "items": { "type": "integer" }, "description": format!("[x, y] of {what}, in screenshot pixels") });
+    json!([
+        tool("screenshot", "See the screen now.", json!({})),
+        tool("left_click", "Click a point.", json!({ "coordinate": point("the point") })),
+        tool("double_click", "Double-click a point.", json!({ "coordinate": point("the point") })),
+        tool("right_click", "Right-click a point.", json!({ "coordinate": point("the point") })),
+        tool(
+            "left_click_drag",
+            "Press at one point, drag to another, release.",
+            json!({ "start_coordinate": point("where the drag starts"), "coordinate": point("where it ends") }),
+        ),
+        tool("mouse_move", "Move the mouse to a point, e.g. to hover.", json!({ "coordinate": point("the point") })),
+        tool(
+            "scroll",
+            "Scroll with the mouse over a point.",
+            json!({
+                "coordinate": point("the point to scroll over"),
+                "scroll_direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+                "scroll_amount": { "type": "integer", "description": "Wheel clicks, 1 to 30." },
+            }),
+        ),
+        tool("type", "Type text into whatever has the keyboard. \\n presses Enter.", json!({ "text": { "type": "string" } })),
+        tool(
+            "key",
+            "Press a key or a combination.",
+            json!({ "text": { "type": "string", "description": "e.g. \"Return\", \"ctrl+l\", \"super\", \"alt+F4\", \"Page_Down\"" } }),
+        ),
+        tool("wait", "Wait for something to load.", json!({ "duration": { "type": "number", "description": "Seconds, up to 10." } })),
+        tool(
+            "zoom",
+            "See part of the screen up close.",
+            json!({ "region": { "type": "array", "items": { "type": "integer" }, "description": "[x0, y0, x1, y1] in screenshot pixels" } }),
+        ),
+        tool("ask_user", ASK_USER, json!({ "question": { "type": "string", "description": QUESTION } })),
+        tool("remember", crate::memory::REMEMBER, json!({ "fact": { "type": "string" } })),
     ])
 }
 
@@ -114,8 +162,72 @@ pub fn computer_answer(yes: bool) {
 }
 
 async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
-    let key = crate::ask::api_key(app).ok_or("no-key")?;
+    let (provider, key) = crate::ai::chosen(app).ok_or("no-key")?;
     let screen = input::Screen::primary();
+    step(app, "Looking");
+    match provider {
+        Provider::Opencode => run_claude(app, &key, task, screen).await,
+        _ => run_chat(app, provider, &key, task, screen).await,
+    }
+}
+
+/// What came of one tool call.
+enum Outcome {
+    Text(String),
+    /// A base64 PNG.
+    Image(String),
+    Error(String),
+}
+
+/// The task was stopped mid-turn.
+struct Stopped;
+
+/// Runs one tool call. After a failure the rest of the turn's computer actions are skipped.
+async fn perform(
+    app: &AppHandle,
+    screen: input::Screen,
+    name: String,
+    input: Value,
+    failed: &mut bool,
+) -> Result<Outcome, Stopped> {
+    if name == "remember" {
+        crate::memory::remember(app, input["fact"].as_str().unwrap_or(""));
+        return Ok(Outcome::Text("Saved.".into()));
+    }
+    if name == "ask_user" {
+        let question = input["question"].as_str().unwrap_or("Go ahead?").to_string();
+        let said = if *failed {
+            "Not asked: an earlier action in this turn failed."
+        } else if confirm(app, &question).await {
+            "The user said yes."
+        } else {
+            "The user said no. Don't do it; finish up and say what you left undone."
+        };
+        return Ok(Outcome::Text(said.into()));
+    }
+    if *failed {
+        return Ok(Outcome::Error("Not executed: an earlier computer action in this turn failed.".into()));
+    }
+    if stopped() {
+        return Err(Stopped);
+    }
+    step(app, &describe(&name, &input));
+    let out = tokio::task::spawn_blocking(move || input::act(&screen, &name, &input))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    Ok(match out {
+        Ok(Done::Image(png)) => Outcome::Image(png),
+        Ok(Done::Text(t)) => Outcome::Text(t),
+        Err(e) => {
+            *failed = true;
+            Outcome::Error(e)
+        }
+    })
+}
+
+/// OpenCode: Claude with Anthropic's built-in computer tool.
+async fn run_claude(app: &AppHandle, key: &str, task: &str, screen: input::Screen) -> Result<String, String> {
+    let model = Provider::Opencode.model(app, Job::Computer);
     // Go routes and caches by conversation.
     let session = format!(
         "choco-computer-{}",
@@ -123,24 +235,23 @@ async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
     );
     let client = reqwest::Client::new();
     let mut messages = vec![json!({ "role": "user", "content": task })];
-    step(app, "Looking");
 
     for _ in 0..MAX_STEPS {
         if stopped() {
             return Ok("Stopped.".into());
         }
         let body = json!({
-            "model": MODEL,
+            "model": model,
             "max_tokens": 8000,
             // Thinks before acting, as much as each step needs.
             "thinking": { "type": "adaptive" },
             "system": system(app, SHOT_W, screen.shot_h),
-            "tools": tools(),
+            "tools": claude_tools(),
             "messages": messages,
         });
         let res = client
-            .post(URL)
-            .header("x-api-key", &key)
+            .post(CLAUDE_URL)
+            .header("x-api-key", key)
             .header("x-opencode-session", &session)
             .header("anthropic-version", "2023-06-01")
             .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")))
@@ -151,8 +262,7 @@ async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
         let status = res.status();
         let msg: Value = res.json().await.map_err(|e| format!("bad response: {e}"))?;
         if !status.is_success() {
-            let detail = msg["error"]["message"].as_str().unwrap_or("request failed");
-            return Err(format!("{}: {detail}", status.as_u16()));
+            return Err(format!("{}: {}", status.as_u16(), crate::ai::error_message(&msg)));
         }
         if stopped() {
             return Ok("Stopped.".into());
@@ -174,12 +284,13 @@ async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
             step(app, &text);
         }
 
+        let ours = |name: &Value| name == "ask_user" || name == "remember";
         // Go drops toolset_name from the computer's tool_use blocks; it has to go back on them.
         let echoed: Vec<Value> = content
             .iter()
             .map(|b| {
                 let mut b = b.clone();
-                if b["type"] == "tool_use" && b["name"] != "ask_user" && b["name"] != "remember" {
+                if b["type"] == "tool_use" && !ours(&b["name"]) {
                     b["toolset_name"] = json!("computer");
                 }
                 b
@@ -191,61 +302,128 @@ async fn run(app: &AppHandle, task: &str) -> Result<String, String> {
         let mut results = Vec::new();
         let mut failed = false;
         for call in calls {
-            let id = &call["id"];
             let name = call["name"].as_str().unwrap_or("").to_string();
-            let input = call["input"].clone();
-            if name == "remember" {
-                crate::memory::remember(app, input["fact"].as_str().unwrap_or(""));
-                results.push(json!({ "type": "tool_result", "tool_use_id": id, "content": "Saved." }));
-                continue;
+            let mut result = json!({ "type": "tool_result", "tool_use_id": call["id"] });
+            if !ours(&call["name"]) {
+                result["toolset_name"] = json!("computer");
             }
-            if name == "ask_user" {
-                let question = input["question"].as_str().unwrap_or("Go ahead?").to_string();
-                let yes = !failed && confirm(app, &question).await;
-                let said = if failed {
-                    "Not asked: an earlier action in this turn failed."
-                } else if yes {
-                    "The user said yes."
-                } else {
-                    "The user said no. Don't do it; finish up and say what you left undone."
-                };
-                results.push(json!({ "type": "tool_result", "tool_use_id": id, "content": said }));
-                continue;
-            }
-            if failed {
-                results.push(json!({
-                    "type": "tool_result", "tool_use_id": id, "toolset_name": "computer", "is_error": true,
-                    "content": "Not executed: an earlier computer action in this turn failed.",
-                }));
-                continue;
-            }
-            if stopped() {
-                return Ok("Stopped.".into());
-            }
-            step(app, &describe(&name, &input));
-            let out = tokio::task::spawn_blocking(move || input::act(&screen, &name, &input))
-                .await
-                .map_err(|e| e.to_string())?;
-            results.push(match out {
-                Ok(Done::Image(png)) => json!({
-                    "type": "tool_result", "tool_use_id": id, "toolset_name": "computer",
-                    "content": [{ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": png } }],
-                }),
-                Ok(Done::Text(t)) => json!({
-                    "type": "tool_result", "tool_use_id": id, "toolset_name": "computer", "content": t,
-                }),
-                Err(e) => {
-                    failed = true;
-                    json!({
-                        "type": "tool_result", "tool_use_id": id, "toolset_name": "computer", "is_error": true,
-                        "content": e,
-                    })
+            match perform(app, screen, name, call["input"].clone(), &mut failed).await {
+                Err(Stopped) => return Ok("Stopped.".into()),
+                Ok(Outcome::Text(t)) => result["content"] = json!(t),
+                Ok(Outcome::Image(png)) => {
+                    result["content"] =
+                        json!([{ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": png } }])
                 }
-            });
+                Ok(Outcome::Error(e)) => {
+                    result["content"] = json!(e);
+                    result["is_error"] = json!(true);
+                }
+            }
+            results.push(result);
         }
         messages.push(json!({ "role": "user", "content": results }));
     }
     Ok("That took too many steps, so I stopped.".into())
+}
+
+/// OpenAI and Gemini: the same actions as plain function tools over chat completions.
+async fn run_chat(
+    app: &AppHandle,
+    provider: Provider,
+    key: &str,
+    task: &str,
+    screen: input::Screen,
+) -> Result<String, String> {
+    let model = provider.model(app, Job::Computer);
+    let client = reqwest::Client::new();
+    let mut messages = vec![
+        json!({ "role": "system", "content": system(app, SHOT_W, screen.shot_h) }),
+        json!({ "role": "user", "content": task }),
+    ];
+
+    for _ in 0..MAX_STEPS {
+        if stopped() {
+            return Ok("Stopped.".into());
+        }
+        let body = json!({ "model": model, "messages": messages, "tools": chat_tools() });
+        let res = client
+            .post(provider.chat_url())
+            .bearer_auth(key)
+            .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("network: {e}"))?;
+        let status = res.status();
+        let msg: Value = res.json().await.map_err(|e| format!("bad response: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("{}: {}", status.as_u16(), crate::ai::error_message(&msg)));
+        }
+        if stopped() {
+            return Ok("Stopped.".into());
+        }
+
+        let mut message = msg["choices"][0]["message"].clone();
+        let text = message["content"].as_str().unwrap_or("").trim().to_string();
+        let calls = message["tool_calls"].as_array().cloned().unwrap_or_default();
+        if calls.is_empty() {
+            return Ok(if text.is_empty() { "Done.".into() } else { text });
+        }
+        if !text.is_empty() {
+            step(app, &text);
+        }
+        // Sent back as it came (Gemini needs the thought signatures on its tool calls),
+        // less the output-only annotations.
+        if let Some(m) = message.as_object_mut() {
+            m.remove("annotations");
+        }
+        messages.push(message);
+
+        let mut failed = false;
+        let mut shots = Vec::new();
+        for call in &calls {
+            let name = call["function"]["name"].as_str().unwrap_or("").to_string();
+            // Arguments arrive as a JSON string.
+            let input = call["function"]["arguments"]
+                .as_str()
+                .and_then(|a| serde_json::from_str(a).ok())
+                .unwrap_or_else(|| json!({}));
+            let content = match perform(app, screen, name, input, &mut failed).await {
+                Err(Stopped) => return Ok("Stopped.".into()),
+                Ok(Outcome::Text(t)) => t,
+                Ok(Outcome::Image(png)) => {
+                    shots.push(png);
+                    "Screenshot attached below.".into()
+                }
+                Ok(Outcome::Error(e)) => format!("Error: {e}"),
+            };
+            messages.push(json!({ "role": "tool", "tool_call_id": call["id"], "content": content }));
+        }
+        // Tool results can't hold images here, so screenshots follow as a user message.
+        if !shots.is_empty() {
+            forget_old_screenshots(&mut messages);
+            let mut parts = vec![json!({ "type": "text", "text": "Screenshot from your last actions:" })];
+            parts.extend(shots.into_iter().map(|png| {
+                json!({ "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{png}") } })
+            }));
+            messages.push(json!({ "role": "user", "content": parts }));
+        }
+    }
+    Ok("That took too many steps, so I stopped.".into())
+}
+
+/// Keeps the newest screenshots only, so each request stays small and quick.
+fn forget_old_screenshots(messages: &mut [Value]) {
+    let mut seen = 0;
+    for m in messages.iter_mut().rev() {
+        let has_image = m["content"].as_array().is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"));
+        if has_image {
+            seen += 1;
+            if seen > KEEP_SHOTS {
+                m["content"] = json!("(An older screenshot, no longer shown.)");
+            }
+        }
+    }
 }
 
 /// Shows the question on the island and waits for Yes / No. Stopping, or no answer, is a no.
