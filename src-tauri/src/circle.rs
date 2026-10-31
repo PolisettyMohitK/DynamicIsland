@@ -1,9 +1,11 @@
-//! Circle to ask: Ctrl+Shift+Space dims the screen; draw around anything, then ask about it
-//! out loud or by typing. The circled part goes with the question to the computer-use model of
-//! the AI service in use (ai.rs; Claude Haiku 5.5 through OpenCode Go), and the answer appears
-//! next to the circle. The shortcut is off in game mode.
+//! Circle to ask: Ctrl+Shift+Space dims the screen until you ask, or press it (or Esc) again.
+//! Draw around anything, as often as you like, then ask about it out loud or by typing. The
+//! circled part goes with the question to the computer-use model of the AI service in use
+//! (ai.rs; Claude Haiku 5.5 through OpenCode Go); the screen clears and Choco answers on the
+//! island. The shortcut is off in game mode.
 //!
 //! Events to the overlay: `circle-open`, `circle-level` 0–1 while listening.
+//! Events to the island: `circle-asked` {question}, then `circle-answer` {question, reply}.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -32,27 +34,43 @@ const MAX_QUESTION: Duration = Duration::from_secs(15);
 static STOP_LISTENING: AtomicBool = AtomicBool::new(false);
 
 pub fn spawn(app: AppHandle) {
+    // The shortcut belongs to this thread: Windows posts it here as a message.
     std::thread::spawn(move || {
-        let mut was_down = false;
+        let mut claimed = false;
         loop {
             std::thread::sleep(Duration::from_millis(50));
             if crate::game::on() {
-                // Nothing may pop up over a game.
+                // Nothing may pop up over a game, and the keys are the game's.
                 if let Some(w) = app.get_webview_window("circle") {
-                    let _ = w.hide();
+                    close(&w);
                 }
-                was_down = false;
+                if claimed {
+                    keys::release();
+                    claimed = false;
+                }
                 continue;
             }
-            let down = keys::chord_down();
-            if down && !was_down {
-                if let Err(e) = open(&app) {
-                    eprintln!("[circle] {e}");
+            if !claimed {
+                // Fails while another app holds the same shortcut; keeps trying.
+                claimed = keys::claim();
+            }
+            if claimed && keys::pressed() {
+                match app.get_webview_window("circle") {
+                    Some(w) if w.is_visible().unwrap_or(false) => close(&w),
+                    _ => {
+                        if let Err(e) = open(&app) {
+                            eprintln!("[circle] {e}");
+                        }
+                    }
                 }
             }
-            was_down = down;
         }
     });
+}
+
+fn close(window: &WebviewWindow) {
+    STOP_LISTENING.store(true, Ordering::Relaxed);
+    let _ = window.hide();
 }
 
 fn open(app: &AppHandle) -> tauri::Result<()> {
@@ -93,8 +111,7 @@ fn build(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 
 #[tauri::command]
 pub fn circle_close(window: WebviewWindow) {
-    STOP_LISTENING.store(true, Ordering::Relaxed);
-    let _ = window.hide();
+    close(&window);
 }
 
 #[tauri::command]
@@ -147,11 +164,25 @@ fn listen(app: &AppHandle) -> Result<String, String> {
     crate::choco::transcribe(&audio).map(|t| t.trim().to_string()).map_err(|e| e.to_string())
 }
 
-/// `x, y, w, h`: the circled area in physical pixels, relative to the overlay window.
+/// `x, y, w, h`: the circled area in physical pixels, relative to the overlay window. Takes the
+/// picture, clears the screen and hands the question to the island, which shows the answer.
 #[tauri::command]
-pub async fn circle_ask(app: AppHandle, window: WebviewWindow, x: i32, y: i32, w: i32, h: i32, question: String) -> Result<String, String> {
-    let (provider, key) = crate::ai::chosen(&app).ok_or("Add an AI key on the dashboard first.")?;
-    let origin = window.outer_position().map_err(|e| e.to_string())?;
+pub async fn circle_ask(app: AppHandle, window: WebviewWindow, x: i32, y: i32, w: i32, h: i32, question: String) {
+    let question = if question.trim().is_empty() { "What is this?".to_string() } else { question.trim().to_string() };
+    let _ = app.emit("circle-asked", json!({ "question": question }));
+    let reply = match answer(&app, &window, (x, y, w, h), &question).await {
+        Ok(text) if text.is_empty() => json!({ "text": "No answer came back.", "tone": "bad" }),
+        Ok(text) => json!({ "text": text }),
+        Err(e) => json!({ "text": e, "tone": "bad" }),
+    };
+    let _ = app.emit("circle-answer", json!({ "question": question, "reply": reply }));
+}
+
+async fn answer(app: &AppHandle, window: &WebviewWindow, (x, y, w, h): (i32, i32, i32, i32), question: &str) -> Result<String, String> {
+    let origin = window.outer_position().map_err(|e| e.to_string());
+    close(window);
+    let origin = origin?;
+    let (provider, key) = crate::ai::chosen(app).ok_or("Add an AI key on the dashboard first.")?;
     let (w, h) = (w.max(8), h.max(8));
     let scale = (MAX_SIDE as f32 / w.max(h) as f32).min(1.0);
     let (ow, oh) = (((w as f32) * scale).round() as i32, ((h as f32) * scale).round() as i32);
@@ -162,8 +193,7 @@ pub async fn circle_ask(app: AppHandle, window: WebviewWindow, x: i32, y: i32, w
     .await
     .map_err(|e| e.to_string())?;
 
-    let question = if question.trim().is_empty() { "What is this?".to_string() } else { question };
-    let model = provider.model(&app, Job::Computer);
+    let model = provider.model(app, Job::Computer);
     let client = reqwest::Client::new();
     let req = if provider == Provider::Opencode {
         client
@@ -228,19 +258,44 @@ fn now_ms() -> u128 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
 }
 
+/// Ctrl+Shift+Space as a Windows hotkey: the press is ours alone (it doesn't also type a space
+/// into the app underneath), and holding it down counts once.
 #[cfg(target_os = "windows")]
 mod keys {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_SHIFT, VK_SPACE};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_SPACE,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PeekMessageW, MSG, PM_REMOVE, WM_HOTKEY};
 
-    pub fn chord_down() -> bool {
-        let down = |vk: u16| unsafe { GetAsyncKeyState(vk as i32) < 0 };
-        down(VK_CONTROL) && down(VK_SHIFT) && down(VK_SPACE)
+    const ID: i32 = 1;
+
+    /// For the calling thread; false if another app already has the shortcut.
+    pub fn claim() -> bool {
+        unsafe { RegisterHotKey(std::ptr::null_mut(), ID, MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT, VK_SPACE as u32) != 0 }
+    }
+
+    pub fn release() {
+        unsafe { UnregisterHotKey(std::ptr::null_mut(), ID) };
+    }
+
+    /// Whether it was pressed since the last call.
+    pub fn pressed() -> bool {
+        let mut hit = false;
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), WM_HOTKEY, WM_HOTKEY, PM_REMOVE) } != 0 {
+            hit = true;
+        }
+        hit
     }
 }
 
 #[cfg(not(target_os = "windows"))]
 mod keys {
-    pub fn chord_down() -> bool {
+    pub fn claim() -> bool {
+        false
+    }
+    pub fn release() {}
+    pub fn pressed() -> bool {
         false
     }
 }
