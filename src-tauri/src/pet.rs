@@ -5,7 +5,7 @@
 //! The window only exists while it's out (and a couple of minutes after, so a quick
 //! re-wake is instant): asleep in the island it costs nothing.
 //!
-//! Events: `pet-motion` {motion, facing, slope, excited} where motion is walk | run | rest |
+//! Events: `pet-motion` {motion, facing, slope, gaze, excited} where motion is walk | run | rest |
 //! alert | wake | climb | nudge; `pet-hover` (cursor over the dog); `pet-home` (true while asleep in
 //! the island); `pet-config` (the settings, for the pet page).
 
@@ -121,6 +121,8 @@ pub struct Pet {
     night: AtomicBool,
     /// The pet page has loaded and is listening.
     ready: AtomicBool,
+    /// Clicked: it sits where it is and watches the cursor instead of following.
+    stay: AtomicBool,
 }
 
 #[derive(Clone, Serialize)]
@@ -129,6 +131,8 @@ struct Motion {
     facing: i8,
     /// How far it leans, in degrees: negative nose-up (going up the screen), positive nose-down.
     slope: i8,
+    /// While staying: how far it tips its head to look at the cursor, degrees (negative is up).
+    gaze: i8,
     excited: bool,
 }
 
@@ -159,6 +163,11 @@ pub fn pet_context(app: AppHandle, calm: bool, night: bool) {
     let pet = app.state::<Pet>();
     pet.calm.store(calm, Ordering::Relaxed);
     pet.night.store(night, Ordering::Relaxed);
+}
+
+#[tauri::command]
+pub fn pet_stay(app: AppHandle, stay: bool) {
+    app.state::<Pet>().stay.store(stay, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -216,7 +225,8 @@ struct Legs {
     vy: f64,
     facing: i8,
     slope: i8,
-    sent: Option<(&'static str, i8, i8, bool)>,
+    gaze: i8,
+    sent: Option<(&'static str, i8, i8, i8, bool)>,
     hovered: bool,
     last_cursor: (i32, i32),
     last_moved: Instant,
@@ -242,6 +252,7 @@ impl Legs {
             vy: 0.0,
             facing: 1,
             slope: 0,
+            gaze: 0,
             sent: None,
             hovered: false,
             last_cursor: island::cursor_pos(),
@@ -335,13 +346,17 @@ impl Legs {
             }
             Where::Out => {
                 if wake.as_deref() == Some("nudge") {
+                    // A reminder beats being told to stay.
                     self.nudge = true;
+                    self.pet().stay.store(false, Ordering::Relaxed);
                 }
                 let still = now - self.last_moved;
                 let night = config.night_sleep && self.pet().night.load(Ordering::Relaxed);
+                // Told to stay, it stays (and naps there) until clicked or sent home.
+                let stay = self.pet().stay.load(Ordering::Relaxed);
                 if home_asked
-                    || still >= Duration::from_secs(config.sleep_after_min.max(1) as u64 * 60)
-                    || (night && still >= NIGHT_IDLE)
+                    || (!stay && still >= Duration::from_secs(config.sleep_after_min.max(1) as u64 * 60))
+                    || (!stay && night && still >= NIGHT_IDLE)
                 {
                     self.at = Where::Walking(now, home_asked);
                 } else {
@@ -401,12 +416,27 @@ impl Legs {
         }
         self.at = Where::Home;
         self.nudge = false;
+        self.pet().stay.store(false, Ordering::Relaxed);
         let _ = self.app.emit("pet-home", true);
     }
 
     fn follow(&mut self, now: Instant, dt: f64, config: &PetConfig) {
         let scale = self.scale();
         let (cx, cy) = (self.last_cursor.0 as f64, self.last_cursor.1 as f64);
+        if self.pet().stay.load(Ordering::Relaxed) {
+            // Staying: stock still, turning to keep its eyes on the cursor.
+            self.vx = 0.0;
+            self.vy = 0.0;
+            self.slope = 0;
+            self.alert_until = None;
+            if (cx - self.x).abs() > 6.0 * scale {
+                self.facing = if cx >= self.x { 1 } else { -1 };
+            }
+            let (dx, dy) = ((cx - self.x).abs().max(1.0), cy - (self.y - 38.0 * scale));
+            self.gaze = ((dy.atan2(dx).to_degrees().clamp(-40.0, 30.0) / 3.0).round() * 3.0) as i8;
+            self.send("rest");
+            return;
+        }
         let calm = self.pet().calm.load(Ordering::Relaxed);
         let excited = now < self.excited_until && !calm;
         let mut keep = match config.distance.as_str() {
@@ -591,7 +621,7 @@ impl Legs {
 
     fn send(&mut self, motion: &'static str) {
         let excited = Instant::now() < self.excited_until;
-        let next = (motion, self.facing, self.slope, excited);
+        let next = (motion, self.facing, self.slope, self.gaze, excited);
         if self.sent == Some(next) {
             return;
         }
@@ -599,7 +629,7 @@ impl Legs {
         let _ = self.app.emit_to(
             "pet",
             "pet-motion",
-            Motion { motion, facing: self.facing, slope: self.slope, excited },
+            Motion { motion, facing: self.facing, slope: self.slope, gaze: self.gaze, excited },
         );
     }
 }
