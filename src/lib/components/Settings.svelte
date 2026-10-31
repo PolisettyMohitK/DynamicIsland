@@ -6,7 +6,7 @@
   import { choco, type Sensitivity } from '$lib/choco.svelte';
   import { focus, LENGTH } from '$lib/focus.svelte';
   import { pet, type Distance, type Energy } from '$lib/pet.svelte';
-  import { setColour, startTyping, stopTyping, ui, type Colour } from '$lib/ui.svelte';
+  import { setColour, setTuck, setWave, startTyping, stopTyping, ui, type Colour, type WaveStyle } from '$lib/ui.svelte';
   import { water } from '$lib/water.svelte';
   import IconButton from './IconButton.svelte';
   import Segmented from './Segmented.svelte';
@@ -24,6 +24,12 @@
   const COLOURS: { value: Colour; label: string }[] = [
     { value: 'soft', label: 'Soft' },
     { value: 'mono', label: 'Mono' },
+  ];
+  const WAVES: { value: WaveStyle; label: string }[] = [
+    { value: 'line', label: 'Line' },
+    { value: 'bars', label: 'Bars' },
+    { value: 'mirror', label: 'Mirror' },
+    { value: 'dots', label: 'Dots' },
   ];
   const DISTANCES: { value: Distance; label: string }[] = [
     { value: 'close', label: 'Near' },
@@ -126,7 +132,12 @@
 
       <h3>Look</h3>
       <div class="row"><span>Colour</span><Segmented options={COLOURS} value={ui.colour} onchange={setColour} /></div>
+      <div class="row"><span>Music waves</span><Segmented options={WAVES} value={ui.wave} onchange={setWave} /></div>
       <div class="row"><span>Lyrics while playing</span><Toggle label="Lyrics in the live bar" on={lyricsOn} onchange={onLyrics} /></div>
+      <div class="row">
+        <span title="When it's docked on the left or right">Tuck into the side</span>
+        <Toggle label="Tuck into the side edge" on={ui.tuck} onchange={setTuck} />
+      </div>
     </section>
 
     <section>
@@ -190,6 +201,14 @@
     display: grid;
     grid-template-columns: 1.15fr 1fr 1fr;
     gap: 28px;
+  }
+  /* Docked on a side: one column, as tall as it needs. */
+  :global(.side) .settings {
+    width: 400px;
+  }
+  :global(.side) .cols {
+    grid-template-columns: 1fr;
+    gap: 6px;
   }
   section {
     display: flex;

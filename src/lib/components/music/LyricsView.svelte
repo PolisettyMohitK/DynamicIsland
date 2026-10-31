@@ -107,6 +107,24 @@
     /* Fade lines out towards the top and bottom edges. */
     mask: linear-gradient(transparent, #000 30%, #000 70%, transparent);
   }
+  /* Docked on a side: the lyrics sit under the player instead of beside it. */
+  :global(.side) .player {
+    right: 28px;
+    width: auto;
+  }
+  :global(.side) .divider {
+    left: 28px;
+    right: 28px;
+    top: 180px;
+    bottom: auto;
+    width: auto;
+    height: 1px;
+  }
+  :global(.side) .lyrics {
+    left: 28px;
+    right: 28px;
+    top: 180px;
+  }
   ol {
     list-style: none;
     margin: 0;

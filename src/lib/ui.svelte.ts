@@ -5,13 +5,29 @@ import { load, save } from './store';
 /** Soft: a muted colour per page. Mono: one quiet colour for everything. */
 export type Colour = 'soft' | 'mono';
 
+/** How the music waves behind Now Playing are drawn. */
+export type WaveStyle = 'line' | 'bars' | 'mirror' | 'dots';
+
 export const ui = $state({
   /** A text field has the keyboard; the island stays open until it's done. */
   typing: false,
   colour: load<Colour>('colour', 'soft'),
   /** Lyrics in the live bar and beside Now Playing. */
   lyricsOn: load('lyricsOn', false),
+  /** Docked on a side, the resting pill tucks into the edge with just a sliver showing. */
+  tuck: load('tuck', false),
+  wave: load<WaveStyle>('wave', 'line'),
 });
+
+export function setWave(style: WaveStyle) {
+  ui.wave = style;
+  save('wave', style);
+}
+
+export function setTuck(on: boolean) {
+  ui.tuck = on;
+  save('tuck', on);
+}
 
 export function setColour(c: Colour) {
   ui.colour = c;

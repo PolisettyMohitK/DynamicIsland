@@ -7,12 +7,13 @@
   import Icon from './Icon.svelte';
   import Artwork from './music/Artwork.svelte';
   import AppsTab from './cc/AppsTab.svelte';
+  import ClaudeTab from './cc/ClaudeTab.svelte';
   import ClipboardTab from './cc/ClipboardTab.svelte';
   import StatsTab from './cc/StatsTab.svelte';
   import TodayTab from './cc/TodayTab.svelte';
   import WallpaperTab from './cc/WallpaperTab.svelte';
 
-  const TABS = ['Controls', 'Today', 'Stats', 'Clipboard', 'Apps', 'Wallpaper', 'Power'] as const;
+  const TABS = ['Controls', 'Today', 'Claude', 'Stats', 'Clipboard', 'Apps', 'Wallpaper', 'Power'] as const;
   const POWER: { action: PowerAction; label: string; icon: IconName; confirm?: boolean }[] = [
     { action: 'lock', label: 'Lock', icon: 'lock' },
     { action: 'sleep', label: 'Sleep', icon: 'moon' },
@@ -22,11 +23,22 @@
   ];
   /** How long a "click again" stays armed. */
   const ARM_MS = 3000;
+  /** A wheel or trackpad flick moves one tab, then waits this long before the next. */
+  const WHEEL_GAP = 160;
 
   let tab = $state<(typeof TABS)[number]>('Controls');
   let picking = $state(false);
   let armed = $state<PowerAction | null>(null);
   let disarm: ReturnType<typeof setTimeout>;
+  // The tabs sit on a track that slides to keep the open one in the middle.
+  const index = $derived(TABS.indexOf(tab));
+  let tabEls = $state<HTMLButtonElement[]>([]);
+  let stripW = $state(0);
+  const shift = $derived.by(() => {
+    const el = tabEls[index];
+    return el ? stripW / 2 - (el.offsetLeft + el.offsetWidth / 2) : 0;
+  });
+  let lastWheel = 0;
 
   const s = $derived(control.state);
   const output = $derived(s?.outputs.find((o) => o.default));
@@ -49,13 +61,39 @@
     armed = null;
     control.power(p.action);
   }
+
+  function open(t: (typeof TABS)[number]) {
+    tab = t;
+    picking = false;
+  }
+
+  // The wheel over the tabs turns them, and stays there rather than closing the Control Centre.
+  function onWheel(e: WheelEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (d === 0 || Date.now() - lastWheel < WHEEL_GAP) return;
+    const next = Math.min(TABS.length - 1, Math.max(0, index + Math.sign(d)));
+    if (next === index) return;
+    lastWheel = Date.now();
+    open(TABS[next]);
+  }
 </script>
 
 <div class="cc">
-  <nav>
-    {#each TABS as t}
-      <button class="tab" class:on={tab === t} onclick={() => ((tab = t), (picking = false))}>{t}</button>
-    {/each}
+  <!-- Tabs further from the open one blur and fade towards the ends. -->
+  <nav bind:clientWidth={stripW} onwheel={onWheel}>
+    <div class="track" style="transform: translateX({shift}px)">
+      {#each TABS as t, i}
+        <button
+          bind:this={tabEls[i]}
+          class="tab"
+          class:on={tab === t}
+          style="--d: {Math.min(Math.abs(i - index), 3)}"
+          onclick={() => open(t)}>{t}</button
+        >
+      {/each}
+    </div>
   </nav>
 
   {#if tab === 'Controls'}
@@ -151,6 +189,8 @@
     </div>
   {:else if tab === 'Today'}
     <div class="body" in:fade={{ duration: 160 }}><TodayTab /></div>
+  {:else if tab === 'Claude'}
+    <div class="body" in:fade={{ duration: 160 }}><ClaudeTab /></div>
   {:else if tab === 'Wallpaper'}
     <div class="body" in:fade={{ duration: 160 }}><WallpaperTab /></div>
   {:else if tab === 'Stats'}
@@ -186,9 +226,19 @@
     gap: 10px;
   }
   nav {
+    height: 32px;
+    overflow: hidden;
+    mask: linear-gradient(to right, transparent, #000 22%, #000 78%, transparent);
+  }
+  .track {
     display: flex;
-    justify-content: center;
     gap: 4px;
+    width: max-content;
+    transition: transform 420ms var(--spring);
+  }
+  /* Docked on a side it's narrower. */
+  :global(.side) .cc {
+    width: 400px;
   }
   .tab {
     height: 32px;
@@ -199,9 +249,14 @@
     color: var(--text-faint);
     font: 600 12px var(--font);
     cursor: pointer;
+    flex: none;
+    filter: blur(calc(var(--d) * 0.7px));
+    opacity: calc(1 - var(--d) * 0.18);
     transition:
       color 160ms,
-      background 160ms;
+      background 160ms,
+      filter 300ms var(--ease-out),
+      opacity 300ms var(--ease-out);
   }
   .tab:hover {
     color: var(--text-dim);
@@ -221,13 +276,13 @@
     gap: 8px;
   }
   .three {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .two {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .five {
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
   button {
     font: inherit;

@@ -5,11 +5,17 @@
   import Artwork from './Artwork.svelte';
   import Controls from './Controls.svelte';
   import Progress from './Progress.svelte';
+  import Waves from './Waves.svelte';
+  import { ui } from '$lib/ui.svelte';
 
   let { lyricsOn, onLyrics }: { lyricsOn: boolean; onLyrics: () => void } = $props();
 </script>
 
 {#if nowPlaying.media}
+  {#if nowPlaying.media.playing}
+    <!-- Behind everything else, so the controls stay on top. -->
+    <div class="waves"><Waves style={ui.wave} colour={nowPlaying.colour ?? '255 255 255'} /></div>
+  {/if}
   <div class="art" class:paused={!nowPlaying.media.playing}><Artwork size={64} /></div>
   <div class="meta">
     <b>{nowPlaying.media.title}</b>
@@ -28,6 +34,15 @@
 {/if}
 
 <style>
+  .waves {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 80px;
+    opacity: 0.45;
+    pointer-events: none;
+  }
   .art {
     position: absolute;
     left: var(--edge);

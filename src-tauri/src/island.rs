@@ -1,22 +1,56 @@
 // Window placement, hover tracking, click-through, hiding and
-// Caps Lock events for the island window. You can drag the island out of the way;
-// `island-moved` (bool) says whether it's away from the top middle of its screen.
-use std::sync::atomic::{AtomicBool, Ordering};
+// Caps Lock events for the island window. Dragging the island moves it to the nearest screen
+// edge (top, left or right), where it docks; `island-dock` says which, `island-dragging`
+// whether it's being carried.
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
-// Logical size of the transparent window: the largest state (a long answer) plus room for its shadow.
+// Logical size of the transparent window at the top: the largest state (a long answer) plus
+// room for its shadow. On a side it's SIDE_WIDTH wide and as tall as the work area.
 pub const WINDOW_WIDTH: f64 = 900.0;
 pub const WINDOW_HEIGHT: f64 = 640.0;
+pub const SIDE_WIDTH: f64 = 480.0;
+const DOCK_FILE: &str = "island_dock.txt";
+/// How often the window follows the cursor while it's carried.
+const DRAG_POLL: Duration = Duration::from_millis(7);
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Dock {
+    Top,
+    Left,
+    Right,
+}
+
+impl Dock {
+    const ALL: [Dock; 3] = [Dock::Top, Dock::Left, Dock::Right];
+
+    fn name(self) -> &'static str {
+        match self {
+            Dock::Top => "top",
+            Dock::Left => "left",
+            Dock::Right => "right",
+        }
+    }
+}
+
+static DOCK: AtomicU8 = AtomicU8::new(0);
+static DRAGGING: AtomicBool = AtomicBool::new(false);
+
+fn dock() -> Dock {
+    Dock::ALL[DOCK.load(Ordering::Relaxed) as usize]
+}
 
 const POLL: Duration = Duration::from_millis(30);
 const HIDDEN_POLL: Duration = Duration::from_millis(500);
 const HIDE_EVERY: u32 = 10; // polls between checks of whether to hide (~300ms)
 
-/// Logical size of the island's interactive area, top-centred in the window.
-pub struct HitSize(pub Mutex<(f64, f64)>);
+/// The island's interactive area in the window, logical (x, y, width, height).
+pub struct HitSize(pub Mutex<(f64, f64, f64, f64)>);
 
 /// Set from the tray menu.
 pub struct UserHidden(pub Arc<AtomicBool>);
@@ -25,8 +59,8 @@ pub struct UserHidden(pub Arc<AtomicBool>);
 pub struct Hovered(pub AtomicBool);
 
 #[tauri::command]
-pub fn set_hit_size(state: State<HitSize>, width: f64, height: f64) {
-    *state.0.lock().unwrap() = (width, height);
+pub fn set_hit_size(state: State<HitSize>, x: f64, y: f64, width: f64, height: f64) {
+    *state.0.lock().unwrap() = (x, y, width, height);
 }
 
 /// The island never takes focus, except while you type into it (adding a task).
@@ -45,36 +79,100 @@ pub fn is_hovered(state: State<Hovered>) -> bool {
     state.0.load(Ordering::Relaxed)
 }
 
-/// Put the window at the top centre of the primary monitor.
+/// Dock the window where it was last left, on the primary monitor.
 pub fn place(window: &WebviewWindow) -> tauri::Result<()> {
-    let monitor = window.primary_monitor()?.or(window.current_monitor()?);
-    window.set_size(tauri::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))?;
-    if let Some(monitor) = monitor {
-        window.set_position(middle(&monitor))?;
+    let saved = config(window.app_handle()).and_then(|f| std::fs::read_to_string(f).ok());
+    if let Some(d) = Dock::ALL.into_iter().find(|d| saved.as_deref().map(str::trim) == Some(d.name())) {
+        DOCK.store(d as u8, Ordering::Relaxed);
     }
-    let app = window.app_handle().clone();
-    let moved = window.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Moved(pos) = event {
-            let away = moved.current_monitor().ok().flatten().is_some_and(|m| middle(&m) != *pos);
-            let _ = app.emit("island-moved", away);
-        }
-    });
+    if let Some(monitor) = window.primary_monitor()?.or(window.current_monitor()?) {
+        layout(window, &monitor, dock())?;
+    }
     window.set_ignore_cursor_events(true)
 }
 
-/// Where the window sits for the island to be at the top middle of `monitor`.
-fn middle(monitor: &tauri::Monitor) -> tauri::PhysicalPosition<i32> {
-    let width = (WINDOW_WIDTH * monitor.scale_factor()).round() as i32;
-    let x = monitor.position().x + (monitor.size().width as i32 - width) / 2;
-    tauri::PhysicalPosition::new(x, monitor.position().y)
+fn config(app: &AppHandle) -> Option<std::path::PathBuf> {
+    Some(app.path().app_config_dir().ok()?.join(DOCK_FILE))
 }
 
-/// Back to the top middle of the screen it's on, after being dragged aside.
+/// Size and place the window for `dock` on `monitor`: flush against that edge, and on a side
+/// as tall as the space above the taskbar.
+fn layout(window: &WebviewWindow, monitor: &tauri::Monitor, dock: Dock) -> tauri::Result<()> {
+    let scale = monitor.scale_factor();
+    let (mx, my) = (monitor.position().x, monitor.position().y);
+    let mw = monitor.size().width as i32;
+    let work = monitor.work_area();
+    let (w, h, x, y) = match dock {
+        Dock::Top => {
+            let w = (WINDOW_WIDTH * scale).round() as i32;
+            (w, (WINDOW_HEIGHT * scale).round() as i32, mx + (mw - w) / 2, my)
+        }
+        Dock::Left | Dock::Right => {
+            let w = (SIDE_WIDTH * scale).round() as i32;
+            let x = if dock == Dock::Left { mx } else { mx + mw - w };
+            (w, work.size.height as i32, x, work.position.y)
+        }
+    };
+    window.set_size(tauri::PhysicalSize::new(w, h))?;
+    window.set_position(tauri::PhysicalPosition::new(x, y))
+}
+
 #[tauri::command]
-pub fn island_recentre(window: WebviewWindow) -> Result<(), String> {
-    let monitor = window.current_monitor().map_err(|e| e.to_string())?.ok_or("no monitor")?;
-    window.set_position(middle(&monitor)).map_err(|e| e.to_string())
+pub fn island_dock() -> Dock {
+    dock()
+}
+
+/// The edge of the cursor's monitor nearest the cursor.
+fn nearest(app: &AppHandle, (cx, cy): (i32, i32)) -> Option<(tauri::Monitor, Dock)> {
+    let monitor = app.monitor_from_point(cx as f64, cy as f64).ok().flatten()?;
+    let (mx, my) = (monitor.position().x, monitor.position().y);
+    let mw = monitor.size().width as i32;
+    let edges = [(Dock::Top, cy - my), (Dock::Left, cx - mx), (Dock::Right, mx + mw - cx)];
+    let dock = edges.into_iter().min_by_key(|&(_, d)| d).map(|(d, _)| d)?;
+    Some((monitor, dock))
+}
+
+/// Carry the island with the cursor until the button is let go, then dock it at the nearest
+/// edge. Windows' own window drag isn't used: it shows the window's outline and stalls the page.
+#[tauri::command]
+pub fn island_drag(app: AppHandle, window: WebviewWindow) {
+    if DRAGGING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _ = app.emit("island-dragging", true);
+        let start = cursor_pos();
+        let (left, top) = frame().map_or((0, 0), |(l, t, _, _)| (l, t));
+        while button_down() {
+            let now = cursor_pos();
+            move_to(left + now.0 - start.0, top + now.1 - start.1);
+            std::thread::sleep(DRAG_POLL);
+        }
+        if let Some((monitor, d)) = nearest(&app, cursor_pos()) {
+            DOCK.store(d as u8, Ordering::Relaxed);
+            if let Some(file) = config(&app) {
+                let _ = std::fs::create_dir_all(file.parent().unwrap());
+                let _ = std::fs::write(file, d.name());
+            }
+            let _ = layout(&window, &monitor, d);
+            let _ = app.emit("island-dock", d);
+        }
+        let _ = app.emit("island-dragging", false);
+        DRAGGING.store(false, Ordering::Release);
+    });
+}
+
+/// Just under the island where it rests (beside it on a side), for the pet to hop out of and
+/// climb back into.
+pub(crate) fn pet_home(dog_w: f64, dog_h: f64) -> Option<(f64, f64)> {
+    let (left, top, width, scale) = frame()?;
+    let (l, t, w) = (left as f64, top as f64, width as f64);
+    let middle = t + window_height()? / 2.0 + dog_h / 2.0 * scale;
+    Some(match dock() {
+        Dock::Top => (l + w / 2.0, t + (30.0 + dog_h) * scale),
+        Dock::Left => (l + (50.0 + dog_w / 2.0) * scale, middle),
+        Dock::Right => (l + w - (50.0 + dog_w / 2.0) * scale, middle),
+    })
 }
 
 pub fn spawn_watcher(app: AppHandle, window: WebviewWindow) {
@@ -141,14 +239,41 @@ pub(crate) fn frame() -> Option<(i32, i32, i32, f64)> {
 }
 
 fn cursor_inside(app: &AppHandle) -> bool {
-    let Some((left, top, width, scale)) = frame() else { return false };
-    let (w, h) = *app.state::<HitSize>().0.lock().unwrap();
+    let Some((left, top, _, scale)) = frame() else { return false };
+    let (x, y, w, h) = *app.state::<HitSize>().0.lock().unwrap();
     let (cx, cy) = cursor_pos();
-    let half = w * scale / 2.0;
-    let centre = left as f64 + width as f64 / 2.0;
-    let x = cx as f64;
-    let y = cy as f64;
-    x >= centre - half && x <= centre + half && y >= top as f64 && y <= top as f64 + h * scale
+    let (cx, cy) = ((cx - left) as f64 / scale, (cy - top) as f64 / scale);
+    cx >= x && cx <= x + w && cy >= y && cy <= y + h
+}
+
+/// The window's physical height, straight from Windows.
+#[cfg(target_os = "windows")]
+fn window_height() -> Option<f64> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let hwnd = *HWND.get()? as windows_sys::Win32::Foundation::HWND;
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    (unsafe { GetWindowRect(hwnd, &mut r) } != 0).then(|| (r.bottom - r.top) as f64)
+}
+
+/// Moves the window without waiting for the UI thread, so a drag never stutters.
+#[cfg(target_os = "windows")]
+fn move_to(x: i32, y: i32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let Some(&hwnd) = HWND.get() else { return };
+    let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS;
+    unsafe { SetWindowPos(hwnd as _, std::ptr::null_mut(), x, y, 0, 0, flags) };
+}
+
+/// The primary mouse button (the right one if they're swapped) is held.
+#[cfg(target_os = "windows")]
+fn button_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
+    let key = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    unsafe { GetAsyncKeyState(key as i32) as u16 & 0x8000 != 0 }
 }
 
 #[cfg(target_os = "windows")]
@@ -229,6 +354,19 @@ pub(crate) fn fullscreen_app_active() -> bool {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn cursor_pos() -> (i32, i32) {
     (-1, -1)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn window_height() -> Option<f64> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn move_to(_x: i32, _y: i32) {}
+
+#[cfg(not(target_os = "windows"))]
+fn button_down() -> bool {
+    false
 }
 
 #[cfg(not(target_os = "windows"))]

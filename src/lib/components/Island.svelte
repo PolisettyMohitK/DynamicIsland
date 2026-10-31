@@ -4,12 +4,12 @@
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { untrack } from 'svelte';
   import { onPopup, type Popup } from '$lib/alerts';
   import { clock } from '$lib/clock.svelte';
   import { focus, LABEL } from '$lib/focus.svelte';
   import { choco } from '$lib/choco.svelte';
+  import { claude } from '$lib/claude.svelte';
   import { dictation } from '$lib/dictation.svelte';
   import { nowPlaying } from '$lib/media.svelte';
   import { pet } from '$lib/pet.svelte';
@@ -20,7 +20,7 @@
   import { serveSettings } from '$lib/settings-host.svelte';
   import { setLyrics, ui } from '$lib/ui.svelte';
   import { water } from '$lib/water.svelte';
-  import { ISLAND_TOP, type Shape } from '$lib/glass';
+  import { ISLAND_GAP, islandRect, type Dock, type Shape } from '$lib/glass';
   import Answer from './Answer.svelte';
   import Bars from './Bars.svelte';
   import BatteryRing from './BatteryRing.svelte';
@@ -65,6 +65,21 @@
   const AWAY: Shape = { w: 64, h: 22, r: 11 };
   /** The resting pill while Choco sleeps in it: the time on its left, the day on its right. */
   const SLEEPING: Shape = { w: 184, h: 32, r: 16 };
+  // Docked on a side the window is narrow and tall: resting states stand upright, and open
+  // ones are SIDE_W wide and stack what sits side by side at the top.
+  const SIDE_W = 400;
+  const SIDE_SHAPES: typeof SHAPES = {
+    ...SHAPES,
+    idle: { w: 32, h: 64, r: 16 },
+    live: { w: 40, h: 200, r: 20 },
+    peek: { w: 56, h: 112, r: 28 },
+    expanded: { w: SIDE_W, h: 180, r: 32 },
+    wide: { w: SIDE_W, h: 360, r: 32 },
+  };
+  const SIDE_AWAY: Shape = { w: 22, h: 64, r: 11 };
+  const SIDE_SLEEPING: Shape = { w: 48, h: 120, r: 24 };
+  /** How much of the resting pill shows when it's tucked into a side edge. */
+  const TUCK_SHOWS = 10;
   const SETTINGS_W = 720;
   const CONTROL_W = 560;
   // Short answers sit in a narrower island than long ones or ones with a card.
@@ -100,6 +115,16 @@
   let settingsH = $state(0);
   let controlH = $state(0);
 
+  let dock = $state<Dock>('top');
+  const side = $derived(dock !== 'top');
+  const shapes = $derived(side ? SIDE_SHAPES : SHAPES);
+  /** Being carried to another edge (island.rs moves the window). */
+  let dragging = $state(false);
+  /** Just docked somewhere new: jump to the new layout rather than animate across. */
+  let snapping = $state(false);
+  let winW = $state(innerWidth);
+  let winH = $state(innerHeight);
+
   let hovered = false;
   /** A reminder that arrived while the island was open. */
   let missed: Popup | null = null;
@@ -109,7 +134,7 @@
   const wide = $derived(page === 0 && lyricsOn && nowPlaying.media !== null);
   const petOut = $derived(pet.settings.enabled && !pet.home);
   const answerW = $derived(
-    choco.reply?.panel || (choco.reply?.text.length ?? 0) > LONG_ANSWER ? ANSWER_WIDE_W : ANSWER_W,
+    side ? SIDE_W : choco.reply?.panel || (choco.reply?.text.length ?? 0) > LONG_ANSWER ? ANSWER_WIDE_W : ANSWER_W,
   );
   /** Choco in the resting pill: asleep at night, when switched off or when the pet is home
       (the island is its bed), bobbing to music. */
@@ -125,23 +150,29 @@
     if (text.length <= SAID_CHARS) return text;
     return '…' + text.slice(-SAID_CHARS).replace(/^\S*\s/, '');
   });
+  const away = $derived(side ? SIDE_AWAY : AWAY);
+  const sleeping = $derived(side ? SIDE_SLEEPING : SLEEPING);
   const shape = $derived<Shape>(
     mode === 'expanded' && wide
-      ? SHAPES.wide
+      ? shapes.wide
       : mode === 'answer'
         ? { w: answerW, h: fit(Math.max(56, answerH)), r: 28 }
         : mode === 'control'
-          ? { w: CONTROL_W, h: fit(Math.max(120, controlH)), r: 36 }
+          ? { w: side ? SIDE_W : CONTROL_W, h: fit(Math.max(120, controlH)), r: 36 }
         : mode === 'settings'
-          ? { w: SETTINGS_W, h: fit(Math.max(180, settingsH)), r: 32 }
+          ? { w: side ? SIDE_W : SETTINGS_W, h: fit(Math.max(180, settingsH)), r: 32 }
           : mode === 'idle' && petOut
-            ? AWAY
+            ? away
             : mode === 'idle' && idleMood === 'sleep'
-              ? SLEEPING
+              ? sleeping
               : mode === 'voice' && said
-                ? { ...SHAPES.voice, w: VOICE_SAID_W }
-                : SHAPES[mode],
+                ? { ...shapes.voice, w: VOICE_SAID_W }
+                : shapes[mode],
   );
+  /** The resting pill's gap to its edge: tucked into a side, only a sliver shows. */
+  const restGap = (s: Shape) => (side && ui.tuck ? TUCK_SHOWS - s.w : ISLAND_GAP);
+  /** Resting, the island floats off its edge; open, it's flush with it, as if it grew out of it. */
+  const gap = $derived(mode === 'idle' ? restGap(shape) : mode === 'live' ? ISLAND_GAP : 0);
   const voice = $derived(mode === 'voice' || mode === 'work' || mode === 'answer');
   const grow = $derived(
     mode === 'expanded' || mode === 'settings' || mode === 'control' || mode === 'popup' || mode === 'live' || mode === 'dictate' || voice,
@@ -227,25 +258,41 @@
     else play(['rest', 0]);
   }
 
-  /** Dragged away from the top middle of the screen (island.rs). */
-  let moved = $state(false);
   /** Where a press started, until it becomes a drag or a click. */
   let press: { x: number; y: number } | null = null;
+  /** The press became a drag, so letting go isn't a click. */
+  let dragged = false;
   /** This far with the button down is a drag, not a click. */
   const DRAG_PX = 6;
 
-  // Drag the island anywhere out of the way. Not from fields, sliders or shelf files,
+  // Drag the island to the top, left or right edge. Not from fields, sliders or shelf files,
   // which have drags of their own.
   function pressDown(e: PointerEvent) {
     const own = (e.target as Element).closest('input, textarea, select, .tile');
     press = e.button === 0 && !own ? { x: e.screenX, y: e.screenY } : null;
+    dragged = false;
   }
 
   function pressMove(e: PointerEvent) {
     if (!press || !(e.buttons & 1)) return;
     if (Math.hypot(e.screenX - press.x, e.screenY - press.y) < DRAG_PX) return;
     press = null;
-    getCurrentWindow().startDragging();
+    dragged = true;
+    invoke('island_drag');
+  }
+
+  function swallowClick(e: MouseEvent) {
+    if (!dragged) return;
+    dragged = false;
+    e.stopPropagation();
+    e.preventDefault();
+  }
+
+  function docked(d: Dock) {
+    if (d === dock) return;
+    dock = d;
+    snapping = true;
+    requestAnimationFrame(() => requestAnimationFrame(() => (snapping = false)));
   }
 
   function showPopup(next: Popup) {
@@ -297,9 +344,18 @@
     }
   }
 
-  // Tell the backend where the island is so clicks elsewhere pass through to the desktop.
+  // Tell the backend where the island is so clicks elsewhere pass through to the desktop. It
+  // reaches back to the screen edge, so the gap counts too; a tucked pill is just its sliver.
   $effect(() => {
-    invoke('set_hit_size', { width: shape.w, height: ISLAND_TOP + shape.h });
+    const r = islandRect(dock, gap, winW, winH, shape);
+    invoke(
+      'set_hit_size',
+      dock === 'top'
+        ? { x: r.x, y: 0, width: r.w, height: r.y + r.h }
+        : dock === 'left'
+          ? { x: 0, y: r.y, width: r.x + r.w, height: r.h }
+          : { x: r.x, y: r.y, width: winW - r.x, height: r.h },
+    );
   });
 
   // The clock ticks twice a second while the island is open; resting, it only wakes on the
@@ -338,6 +394,7 @@
 
   $effect(() => status.start());
   $effect(() => choco.start());
+  $effect(() => claude.start());
   $effect(() => pet.start());
   // The pet keeps quiet while you focus, sleeps at night, bobs to music and listens with you.
   $effect(() => {
@@ -416,36 +473,52 @@
   $effect(() => {
     const unlisten = [
       listen<boolean>('island-hover', (e) => (e.payload ? onEnter() : onLeave())),
-      listen<boolean>('island-moved', (e) => (moved = e.payload)),
+      listen<Dock>('island-dock', (e) => docked(e.payload)),
+      listen<boolean>('island-dragging', (e) => (dragging = e.payload)),
       listen<boolean>('island-caps', (e) =>
         showPopup({ icon: 'caps', label: 'Caps Lock', value: e.payload ? 'On' : 'Off', tone: e.payload ? 'ok' : undefined }),
       ),
     ];
+    invoke<Dock>('island_dock').then(docked);
     // Catch up if the cursor was already over the island when this page loaded.
     invoke<boolean>('is_hovered').then((over) => over && onEnter());
     return () => unlisten.forEach((p) => p.then((off) => off()));
   });
 </script>
 
+<svelte:window bind:innerWidth={winW} bind:innerHeight={winH} />
+
 <!-- Dragging it moves it; the parts inside are the controls. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="island"
+  class="island {dock}"
+  class:side
   class:grow
   class:idle={mode === 'idle'}
-  style="--w: {shape.w}px; --h: {shape.h}px; --r: {shape.r}px"
+  class:dragging
+  class:snapping
+  style="--w: {shape.w}px; --h: {shape.h}px; --r: {shape.r}px; --edge-r: {gap > 0 ? shape.r : 0}px; --gap: {gap}px"
   onwheel={onWheel}
   onpointerdown={pressDown}
   onpointermove={pressMove}
   onpointerup={() => (press = null)}
+  onclickcapture={swallowClick}
 >
   <!-- Each glass refresh copies the screen back from the GPU, so only what you're interacting with
-       gets 30fps; the resting pill refreshes once a second and the live bar 4 times. -->
+       gets 30fps; the resting pill refreshes once a second and the live bar 4 times. While it's
+       carried the backdrop can't keep up, so it goes solid. -->
   <Glass
     {shape}
-    active
+    {dock}
+    {gap}
+    active={!dragging}
     frameMs={mode === 'idle' ? 1000 : mode === 'live' || mode === 'work' ? 250 : 33}
-    prewarm={[AWAY, SLEEPING, SHAPES.peek, SHAPES.expanded, SHAPES.wide, SHAPES.live, SHAPES.popup, SHAPES.voice, SHAPES.work]}
+    prewarm={[
+      [away, restGap(away)],
+      [sleeping, restGap(sleeping)],
+      [shapes.live, ISLAND_GAP],
+      ...[shapes.peek, shapes.expanded, shapes.wide, shapes.popup, shapes.voice, shapes.work].map((s): [Shape, number] => [s, 0]),
+    ]}
   />
   <div class="glow" class:on={glow} style="--album: {glowColour ?? '255 255 255'}"></div>
 
@@ -505,9 +578,6 @@
               {/key}
             {/if}
             <span class="clock">{date}<b>{time}</b><BatteryRing /></span>
-            {#if moved}
-              <button class="recentre" onclick={() => invoke('island_recentre')}>Return to middle</button>
-            {/if}
             <IconButton icon="settings" size={24} quiet label="Settings" onclick={() => play(['settings', 0])} />
           </header>
 
@@ -613,14 +683,16 @@
 </div>
 
 <style>
+  /* Docked at the top it hangs from the top edge, centred; on a side, from that side, centred
+     top to bottom. --edge-r rounds the corners against the edge: 0 once it's flush. */
   .island {
     position: absolute;
-    top: var(--island-top);
+    top: var(--gap);
     left: 50%;
     transform: translateX(-50%);
     width: var(--w);
     height: var(--h);
-    border-radius: var(--r);
+    border-radius: var(--edge-r) var(--edge-r) var(--r) var(--r);
     /* A tight contact shadow and a wide soft one lift it off the desktop. */
     box-shadow:
       0 1px 2px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.5)),
@@ -628,13 +700,33 @@
       0 18px 50px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.7));
     overflow: hidden;
     isolation: isolate;
-    transition-property: width, height, border-radius, box-shadow;
+    transition-property: width, height, border-radius, box-shadow, --gap;
     transition-duration: var(--morph-shrink);
     transition-timing-function: var(--ease-out);
   }
   .island.grow {
     transition-duration: var(--morph-grow);
     transition-timing-function: var(--spring-morph);
+  }
+  .island.side {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .island.left {
+    left: var(--gap);
+    border-radius: var(--edge-r) var(--r) var(--r) var(--edge-r);
+  }
+  .island.right {
+    left: auto;
+    right: var(--gap);
+    border-radius: var(--r) var(--edge-r) var(--edge-r) var(--r);
+  }
+  .island.snapping {
+    transition: none;
+  }
+  /* Carried: solid, since the glass can't follow the window fast enough. */
+  .island.dragging {
+    background: rgb(28 28 32 / 0.94);
   }
   /* The resting pill is small; a deep shadow under it would look like a smudge. */
   .island.idle {
@@ -651,6 +743,17 @@
     left: 50%;
     transform: translateX(-50%);
   }
+  .side .layer {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .left .layer {
+    left: 0;
+  }
+  .right .layer {
+    left: auto;
+    right: 0;
+  }
 
   .peek {
     width: 190px;
@@ -659,6 +762,12 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+  .side .peek {
+    width: 56px;
+    height: 112px;
+    padding: 14px 0;
+    flex-direction: column;
   }
   .peek .time {
     font-size: 13px;
@@ -682,6 +791,20 @@
   }
   .panel.wide {
     width: 675px;
+  }
+  /* On a side both layouts are SIDE_W wide and centred top to bottom; lyrics go underneath. */
+  .side .expanded {
+    width: 400px;
+    height: 0;
+  }
+  .side .panel {
+    top: 50%;
+    left: 0;
+    transform: translateY(-50%);
+    width: 400px;
+  }
+  .side .panel.wide {
+    height: 360px;
   }
   header {
     position: absolute;
@@ -912,6 +1035,31 @@
     color: var(--text-dim);
     animation-delay: 60ms;
   }
+  .side .pet {
+    width: 32px;
+    height: 64px;
+    padding: 0 0 0 1px;
+  }
+  /* Upright: the time above Choco, the day below. */
+  .side .pet.sleeping {
+    width: 48px;
+    height: 120px;
+    grid-template-columns: none;
+    grid-template-rows: 1fr auto 1fr;
+    gap: 6px;
+    padding: 12px 0;
+  }
+  .side .pet .clock,
+  .side .pet .day {
+    margin: 0;
+    justify-self: center;
+  }
+  .side .pet .clock {
+    align-self: start;
+  }
+  .side .pet .day {
+    align-self: end;
+  }
   /* The words surface out of the glass as the pill settles. */
   @keyframes wake-in {
     from {
@@ -976,22 +1124,6 @@
     font: 500 12px var(--font);
     cursor: pointer;
   }
-  .recentre {
-    flex: none;
-    height: 22px;
-    margin: 0 4px 0 10px;
-    padding: 0 9px;
-    border: none;
-    border-radius: 11px;
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--text-dim);
-    font: 600 11.5px var(--font);
-    cursor: pointer;
-  }
-  .recentre:hover {
-    background: rgba(255, 255, 255, 0.16);
-    color: var(--text);
-  }
   .stop:hover {
     color: var(--text);
   }
@@ -1039,5 +1171,26 @@
     content: '';
     width: 40px;
     flex: none;
+  }
+  /* On a side the live bar stands upright and the line runs down it. */
+  .side .live {
+    width: 40px;
+    height: 200px;
+    padding: 14px 0;
+    flex-direction: column;
+  }
+  .side .live .line {
+    min-height: 0;
+    writing-mode: vertical-rl;
+  }
+  .side .note-icon,
+  .side .live:not(.timer)::after {
+    width: auto;
+    height: 22px;
+    justify-content: center;
+  }
+  .side .countdown {
+    width: auto;
+    font-size: 11.5px;
   }
 </style>

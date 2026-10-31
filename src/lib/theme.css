@@ -51,8 +51,14 @@
   --spring-morph: linear(0, 0.021, 0.074, 0.147, 0.232, 0.321, 0.411, 0.497, 0.577, 0.649, 0.714, 0.77, 0.819, 0.86, 0.895, 0.923, 0.946, 0.964, 0.978, 0.989, 0.997, 1.003, 1.007, 1.009, 1.01, 1.011, 1.011, 1.011, 1.01, 1.009, 1.008, 1.007, 1);
   --morph-grow: 550ms;
   --morph-shrink: 200ms;
-  /* The island floats this far below the top of the screen. Matches ISLAND_TOP in glass.ts. */
-  --island-top: 8px;
+}
+
+/* How far the island sits off the screen edge it's docked to (ISLAND_GAP in glass.ts while it
+   rests, 0 open). Registered so it animates, and the glass inside follows it frame by frame. */
+@property --gap {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 8px;
 }
 
 /* Mono: one quiet colour for everything (Settings > Look). */

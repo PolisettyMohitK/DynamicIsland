@@ -17,6 +17,7 @@ mod clipboard;
 mod wallpaper;
 mod dictation;
 mod circle;
+mod claude;
 mod game;
 mod island;
 mod choco;
@@ -25,6 +26,7 @@ mod memory;
 mod pet;
 mod shelf;
 mod status;
+mod waves;
 
 /// Quit for good. A normal exit can stall on the mic, model or hook threads after it has
 /// already let go of the single-instance lock, leaving an island with no dashboard behind
@@ -46,7 +48,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| dashboard::show(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::Builder::new().args([dashboard::QUIET_START]).build())
-        .manage(island::HitSize(Mutex::new((0.0, 0.0))))
+        .manage(island::HitSize(Mutex::new((0.0, 0.0, 0.0, 0.0))))
         .manage(island::UserHidden(Arc::new(AtomicBool::new(false))))
         .manage(island::Hovered(AtomicBool::new(false)))
         .manage(capture::LastFrame(Mutex::new(Vec::new())))
@@ -63,11 +65,13 @@ pub fn run() {
             choco::spawn(app.handle().clone());
             pet::spawn(app.handle().clone());
             game::spawn(app.handle().clone());
-            let quiet = std::env::args().any(|a| a == dashboard::QUIET_START);
-            dashboard::create(app.handle(), !quiet)?;
+            if !std::env::args().any(|a| a == dashboard::QUIET_START) {
+                dashboard::show(app.handle());
+            }
             clipboard::start(app.handle().clone());
             dictation::spawn(app.handle().clone());
             circle::spawn(app.handle().clone());
+            claude::spawn(app.handle().clone());
 
             let open = MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Hide island", true, None::<&str>)?;
@@ -100,7 +104,8 @@ pub fn run() {
             island::set_hit_size,
             island::is_hovered,
             island::set_typing,
-            island::island_recentre,
+            island::island_drag,
+            island::island_dock,
             capture::capture_backdrop,
             status::status_current,
             status::set_volume,
@@ -158,6 +163,10 @@ pub fn run() {
             media::media_seek,
             media::media_artwork,
             media::fetch_lyrics,
+            waves::waves_start,
+            waves::waves_stop,
+            claude::claude_sessions,
+            claude::claude_send,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dynamic Island");

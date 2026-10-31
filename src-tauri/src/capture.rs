@@ -6,7 +6,6 @@ use std::sync::Mutex;
 use tauri::ipc::Response;
 use tauri::{State, WebviewWindow};
 
-use crate::island::{WINDOW_HEIGHT, WINDOW_WIDTH};
 
 /// The last frame sent, so unchanged frames aren't sent again.
 pub struct LastFrame(pub Mutex<Vec<u8>>);
@@ -22,24 +21,29 @@ pub fn exclude_from_capture(window: &WebviewWindow) {
     }
 }
 
-/// RGBA pixels of the top `height` logical px of the screen behind the window,
-/// at logical resolution and `WINDOW_WIDTH` wide. Empty when the window is
-/// hidden, or when nothing changed since the last call unless `force` is set.
+/// RGBA pixels of the screen behind the window's logical rect (`x`, `y`, `width`, `height`),
+/// at logical resolution. Empty when the window is hidden, or when nothing changed since the
+/// last call unless `force` is set.
 #[tauri::command]
 pub async fn capture_backdrop(
     last: State<'_, LastFrame>,
+    x: f64,
+    y: f64,
+    width: f64,
     height: f64,
     force: bool,
 ) -> Result<Response, String> {
-    let Some((x, y, _, scale)) = crate::island::frame() else {
+    let Some((left, top, _, scale)) = crate::island::frame() else {
         return Ok(Response::new(Vec::new()));
     };
-    let out_w = WINDOW_WIDTH as i32;
-    let out_h = height.round().clamp(1.0, WINDOW_HEIGHT) as i32;
-    let src_w = (WINDOW_WIDTH * scale).round() as i32;
+    let out_w = width.round().clamp(1.0, 4096.0) as i32;
+    let out_h = height.round().clamp(1.0, 4096.0) as i32;
+    let src_x = left + (x * scale).round() as i32;
+    let src_y = top + (y * scale).round() as i32;
+    let src_w = (out_w as f64 * scale).round() as i32;
     let src_h = (out_h as f64 * scale).round() as i32;
 
-    let frame = grab(x, y, src_w, src_h, out_w, out_h);
+    let frame = grab(src_x, src_y, src_w, src_h, out_w, out_h);
     let mut last = last.0.lock().unwrap();
     if !force && *last == frame {
         return Ok(Response::new(Vec::new()));

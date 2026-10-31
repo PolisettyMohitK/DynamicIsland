@@ -554,14 +554,9 @@ impl Legs {
         };
     }
 
-    /// Just under the island, where it hops out and climbs back in.
+    /// Just under the island (beside it on a side), where it hops out and climbs back in.
     fn home_spot(&self) -> (f64, f64) {
-        let Some(main) = self.app.get_webview_window("main") else { return (self.x, self.y) };
-        let (Ok(pos), Ok(size), Ok(scale)) = (main.outer_position(), main.outer_size(), main.scale_factor())
-        else {
-            return (self.x, self.y);
-        };
-        (pos.x as f64 + size.width as f64 / 2.0, pos.y as f64 + (30.0 + DOG_H) * scale)
+        island::pet_home(DOG_W, DOG_H).unwrap_or((self.x, self.y))
     }
 
     fn scale(&self) -> f64 {

@@ -1,10 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { ISLAND_TOP, makeLensMap, readGlassSettings, type Shape } from '$lib/glass';
+  import { ISLAND_GAP, islandRect, makeLensMap, readGlassSettings, type Dock, type Shape } from '$lib/glass';
 
-  // Must match WINDOW_WIDTH / WINDOW_HEIGHT in src-tauri/src/island.rs.
-  const WIN_W = 900;
-  const WIN_H = 640;
   // Keep only red, green or blue (with alpha).
   const CHANNELS = [
     '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0',
@@ -14,43 +11,57 @@
 
   let {
     shape,
+    dock,
+    gap,
     active,
     frameMs = 33,
     prewarm = [],
   }: {
     shape: Shape;
+    dock: Dock;
+    /** How far the island sits off the screen edge. */
+    gap: number;
     active: boolean;
     /** Time between captures of what's behind the island. */
     frameMs?: number;
-    prewarm?: Shape[];
+    /** Other shapes and gaps it'll take, to build their lenses early. */
+    prewarm?: [Shape, number][];
   } = $props();
+
+  let winW = $state(innerWidth);
+  let winH = $state(innerHeight);
 
   const settings = readGlassSettings();
   const maps = new Map<string, string>();
-  const mapFor = (s: Shape) => {
-    const key = `${s.w}x${s.h}x${s.r}`;
-    if (!maps.has(key)) maps.set(key, makeLensMap(WIN_W, WIN_H, s, settings.bezel));
+  const mapFor = (s: Shape, g: number) => {
+    const key = `${dock} ${g} ${s.w}x${s.h}x${s.r} ${winW}x${winH}`;
+    if (!maps.has(key)) maps.set(key, makeLensMap(dock, g, winW, winH, s, settings.bezel));
     return maps.get(key)!;
   };
-  const map = $derived(mapFor(shape));
+  const map = $derived(mapFor(shape, gap));
 
+  type Rect = { x: number; y: number; width: number; height: number };
   let canvas: HTMLCanvasElement;
   // Read by the capture loop on every frame without restarting it.
-  let captureHeight = 0;
+  let grab: Rect = { x: 0, y: 0, width: 1, height: 1 };
   let captureEvery = 33;
   // Cuts the loop's sleep short: the idle pill sleeps ~1s, and a growing island must not wait
-  // that long for a strip tall enough to fill it.
+  // that long for a strip big enough to fill it.
   let wake = () => {};
   $effect(() => {
-    // The strip runs from the top of the screen to the island's bottom edge.
-    captureHeight = ISLAND_TOP + shape.h;
+    // A strip across the window from the screen edge to the island's far side (on a side, the
+    // island's height across the window), whatever the gap.
+    grab =
+      dock === 'top'
+        ? { x: 0, y: 0, width: winW, height: Math.min(winH, ISLAND_GAP + shape.h) }
+        : { x: 0, y: Math.max(0, Math.round((winH - shape.h) / 2)), width: winW, height: Math.min(winH, shape.h) };
     captureEvery = frameMs;
     wake();
   });
 
   // Build the other lens maps ahead of time so the first expand doesn't stutter.
   $effect(() => {
-    const id = requestIdleCallback(() => prewarm.forEach(mapFor));
+    const id = requestIdleCallback(() => prewarm.forEach(([s, g]) => mapFor(s, g)));
     return () => cancelIdleCallback(id);
   });
 
@@ -58,17 +69,22 @@
   // a CSS filter re-runs on every frame the island draws, so anything moving on top (Choco's
   // face) would pay for the whole lens each frame.
   let frame: ImageBitmap | null = null;
+  /** Where in the window `frame` was captured. */
+  let frameAt: Rect = grab;
   /** 0–1: how much extra dimming the backdrop needs for white text to stay legible. */
   let dim = $state(0);
   // Average brightness behind the island from a sparse grid of the captured pixels.
-  function measure(px: Uint8ClampedArray) {
-    const left = Math.round((WIN_W - shape.w) / 2);
+  function measure(px: Uint8ClampedArray, at: Rect) {
+    const r = islandRect(dock, gap, winW, winH, shape);
+    const left = Math.max(0, Math.round(r.x - at.x));
+    const top = Math.max(0, Math.round(r.y - at.y));
+    const right = Math.min(at.width, left + shape.w);
+    const bottom = Math.min(at.height, top + shape.h);
     let sum = 0;
     let n = 0;
-    for (let y = ISLAND_TOP; y < ISLAND_TOP + shape.h; y += 6) {
-      for (let x = left; x < left + shape.w; x += 12) {
-        const i = (y * WIN_W + x) * 4;
-        if (i + 2 >= px.length) break;
+    for (let y = top; y < bottom; y += 6) {
+      for (let x = left; x < right; x += 12) {
+        const i = (y * at.width + x) * 4;
         sum += 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
         n++;
       }
@@ -81,8 +97,8 @@
     const ctx = canvas.getContext('2d')!;
     const css = getComputedStyle(canvas);
     ctx.filter = `url(#island-lens) saturate(${css.getPropertyValue('--glass-saturation')}) brightness(${css.getPropertyValue('--glass-brightness')})`;
-    ctx.clearRect(0, 0, WIN_W, WIN_H);
-    ctx.drawImage(frame, 0, 0);
+    ctx.clearRect(0, 0, winW, winH);
+    ctx.drawImage(frame, frameAt.x, frameAt.y);
   }
   // A new shape bends the last frame through its own lens.
   $effect(() => {
@@ -94,7 +110,7 @@
   $effect(() => {
     const ctx = canvas.getContext('2d')!;
     if (!active) {
-      ctx.clearRect(0, 0, WIN_W, WIN_H);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       frame = null;
       return;
     }
@@ -104,14 +120,16 @@
       while (alive) {
         const started = performance.now();
         try {
-          const buf = await invoke<ArrayBuffer>('capture_backdrop', { height: captureHeight, force });
+          const at = grab;
+          const buf = await invoke<ArrayBuffer>('capture_backdrop', { ...at, force });
           force = false;
           if (alive && buf.byteLength) {
             const px = new Uint8ClampedArray(buf);
-            measure(px);
-            const next = await createImageBitmap(new ImageData(px, WIN_W));
+            measure(px, at);
+            const next = await createImageBitmap(new ImageData(px, at.width));
             frame?.close();
             frame = next;
+            frameAt = at;
             draw();
           }
         } catch (e) {
@@ -122,7 +140,7 @@
           const id = setTimeout(r, Math.max(0, captureEvery - (performance.now() - started)));
           wake = () => {
             clearTimeout(id);
-            force = true; // a taller strip is needed even if the screen hasn't changed
+            force = true; // a bigger strip is needed even if the screen hasn't changed
             r();
           };
         });
@@ -151,7 +169,7 @@
   }
 </script>
 
-<svelte:window onpointermove={onMove} />
+<svelte:window onpointermove={onMove} bind:innerWidth={winW} bind:innerHeight={winH} />
 <svelte:document onpointerleave={() => shine.classList.remove('on')} />
 
 <svg width="0" height="0" aria-hidden="true">
@@ -160,11 +178,11 @@
     filterUnits="userSpaceOnUse"
     x="0"
     y="0"
-    width={WIN_W}
-    height={WIN_H}
+    width={winW}
+    height={winH}
     color-interpolation-filters="sRGB"
   >
-    <feImage href={map} x="0" y="0" width={WIN_W} height={WIN_H} preserveAspectRatio="none" result="map" />
+    <feImage href={map} x="0" y="0" width={winW} height={winH} preserveAspectRatio="none" result="map" />
     <feGaussianBlur in="SourceGraphic" stdDeviation={settings.blur} edgeMode="duplicate" result="soft" />
     <!-- Bend red, green and blue by slightly different amounts for colour fringing, then recombine. -->
     {#each CHANNELS as matrix, c}
@@ -183,12 +201,20 @@
   </filter>
 </svg>
 
-<canvas bind:this={canvas} class="backdrop" width={WIN_W} height={WIN_H}></canvas>
+<!-- The canvas covers the whole window, lined up with it whatever the island's size. -->
+<canvas
+  bind:this={canvas}
+  class="backdrop {dock}"
+  width={winW}
+  height={winH}
+  style="width: {winW}px; height: {winH}px"
+></canvas>
 <div class="tint"></div>
 <div class="dim" style="opacity: {dim}"></div>
-<div class="bevel"></div>
+<!-- Flush against the screen edge, the rim and bevel run on past it, so that side has no lip. -->
+<div class="bevel {dock}" class:flush={gap <= 0}></div>
 <div class="shine" bind:this={shine}></div>
-<div class="rim"></div>
+<div class="rim {dock}" class:flush={gap <= 0}></div>
 
 <style>
   svg {
@@ -196,11 +222,21 @@
   }
   .backdrop {
     position: absolute;
-    top: calc(-1 * var(--island-top));
+    top: calc(-1 * var(--gap));
     left: 50%;
     transform: translateX(-50%);
-    width: 900px;
-    height: 640px;
+  }
+  .backdrop.left,
+  .backdrop.right {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .backdrop.left {
+    left: calc(-1 * var(--gap));
+  }
+  .backdrop.right {
+    left: auto;
+    right: calc(-1 * var(--gap));
   }
   .tint {
     position: absolute;
@@ -230,6 +266,15 @@
       inset 0 -12px 18px -10px rgba(0, 0, 0, 0.45),
       inset 0 0 var(--glass-thickness) rgba(255, 255, 255, calc(var(--glass-specular) * 0.18));
     pointer-events: none;
+  }
+  .flush.top {
+    top: -24px;
+  }
+  .flush.left {
+    left: -24px;
+  }
+  .flush.right {
+    right: -24px;
   }
   .shine {
     position: absolute;
