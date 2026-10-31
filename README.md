@@ -44,9 +44,15 @@ pnpm tauri build      # release build
 
 The first time Choco turns on, it downloads its speech models (~68 MB) into the app's local data folder.
 
-### OpenCode key
+### AI key
 
-Choco's offline commands work without a key. For questions, computer use and memory it needs an [OpenCode](https://opencode.ai) API key with the Go plan: paste it into Settings (the gear in the expanded island). It's stored in the app's config folder, never in the repo.
+Choco's offline commands work without a key. For questions, computer use and memory it needs a key for one of:
+
+- [OpenCode](https://opencode.ai) (Go plan): DeepSeek V4.1 Flash answers, Claude Haiku 5.5 uses the computer.
+- [OpenAI](https://platform.openai.com/api-keys): `gpt-6-luna` answers, `gpt-6.1-terra` uses the computer.
+- [Gemini](https://aistudio.google.com/apikey): `gemini-3.8-flash` for both.
+
+Paste keys into the dashboard (it opens with the app, or from the tray), pick which service to use, and change the models if you like. Keys are stored in the app's config folder, never in the repo; `OPENCODE_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY` work too.
 
 ## Layout
 
@@ -70,7 +76,7 @@ Choco's offline commands work without a key. For questions, computer use and mem
 - [openWakeWord](https://github.com/dscripka/openWakeWord) front-end models (downloaded at runtime). Its models and data are CC BY-NC-SA 4.0, and `src-tauri/models/hey_choco.onnx` is trained on top of them, so the wake word is for non-commercial use.
 - [Moonshine](https://github.com/usefulsensors/moonshine) base for speech-to-text (MIT).
 - [lrclib.net](https://lrclib.net) for lyrics.
-- [OpenCode Go](https://opencode.ai) for DeepSeek V4.1 Flash (the brain) and Claude Haiku 5.5 (computer use).
+- [OpenCode Go](https://opencode.ai), [OpenAI](https://openai.com) or [Gemini](https://ai.google.dev) for the brain and computer use, whichever you pick.
 
 ## License
 

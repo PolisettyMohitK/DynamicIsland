@@ -5,7 +5,7 @@
 //! The window only exists while it's out (and a couple of minutes after, so a quick
 //! re-wake is instant): asleep in the island it costs nothing.
 //!
-//! Events: `pet-motion` {motion, facing, excited} where motion is walk | run | rest |
+//! Events: `pet-motion` {motion, facing, slope, excited} where motion is walk | run | rest |
 //! alert | wake | climb | nudge; `pet-hover` (cursor over the dog); `pet-home` (true while asleep in
 //! the island); `pet-config` (the settings, for the pet page).
 
@@ -127,6 +127,8 @@ pub struct Pet {
 struct Motion {
     motion: &'static str,
     facing: i8,
+    /// How far it leans, in degrees: negative nose-up (going up the screen), positive nose-down.
+    slope: i8,
     excited: bool,
 }
 
@@ -213,7 +215,8 @@ struct Legs {
     vx: f64,
     vy: f64,
     facing: i8,
-    sent: Option<(&'static str, i8, bool)>,
+    slope: i8,
+    sent: Option<(&'static str, i8, i8, bool)>,
     hovered: bool,
     last_cursor: (i32, i32),
     last_moved: Instant,
@@ -238,6 +241,7 @@ impl Legs {
             vx: 0.0,
             vy: 0.0,
             facing: 1,
+            slope: 0,
             sent: None,
             hovered: false,
             last_cursor: island::cursor_pos(),
@@ -380,6 +384,7 @@ impl Legs {
         }
         let _ = self.app.emit("pet-home", false);
         self.at = Where::Waking(now);
+        self.slope = 0;
         self.sent = None;
         self.send("wake");
     }
@@ -473,6 +478,7 @@ impl Legs {
             // Resting: face the cursor.
             self.facing = if cx >= self.x { 1 } else { -1 };
         }
+        self.update_slope();
         if speed < 1.0 {
             if self.nudge {
                 self.nudge = false;
@@ -498,8 +504,24 @@ impl Legs {
         if self.vx.abs() > 1.0 {
             self.facing = if self.vx > 0.0 { 1 } else { -1 };
         }
+        self.update_slope();
         self.send("walk");
         d - step
+    }
+
+    /// Lean into the way it's going: the angle of travel, eased so straight up or down is a
+    /// steep slope rather than standing on end. In steps of SLOPE_STEP so it isn't an event a frame.
+    fn update_slope(&mut self) {
+        const SLOPE_STEP: f64 = 2.0;
+        let speed = self.vx.hypot(self.vy) / self.scale();
+        self.slope = if speed < 1.0 {
+            0
+        } else {
+            // Side-on, so only the up/down part matters: 0° level, ±90° straight up/down.
+            let angle = self.vy.atan2(self.vx.abs()).to_degrees();
+            let tilt = (angle * 0.45).clamp(-38.0, 38.0);
+            ((tilt / SLOPE_STEP).round() * SLOPE_STEP) as i8
+        };
     }
 
     /// Just under the island, where it hops out and climbs back in.
@@ -569,12 +591,16 @@ impl Legs {
 
     fn send(&mut self, motion: &'static str) {
         let excited = Instant::now() < self.excited_until;
-        let next = (motion, self.facing, excited);
+        let next = (motion, self.facing, self.slope, excited);
         if self.sent == Some(next) {
             return;
         }
         self.sent = Some(next);
-        let _ = self.app.emit_to("pet", "pet-motion", Motion { motion, facing: self.facing, excited });
+        let _ = self.app.emit_to(
+            "pet",
+            "pet-motion",
+            Motion { motion, facing: self.facing, slope: self.slope, excited },
+        );
     }
 }
 

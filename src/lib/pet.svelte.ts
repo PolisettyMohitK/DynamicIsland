@@ -46,6 +46,7 @@ class Pet {
 
   set(patch: Partial<PetSettings>) {
     Object.assign(this.settings, patch);
+    this.settings.sleepAfterMin = Math.min(10, Math.max(1, this.settings.sleepAfterMin));
     save('pet', this.settings);
     invoke('pet_configure', { config: this.settings });
   }

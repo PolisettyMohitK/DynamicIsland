@@ -215,7 +215,7 @@ class Choco {
     } catch (e) {
       const msg = String(e);
       const text = msg === 'no-key'
-        ? 'I need an OpenCode key in Settings for that.'
+        ? 'I need an AI key in Settings for that.'
         : msg.startsWith('network')
           ? 'I can’t reach the internet right now.'
           : msg;

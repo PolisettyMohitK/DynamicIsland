@@ -1,16 +1,13 @@
-//! When a spoken request isn't one of the built-in commands, Choco asks DeepSeek V4.1 Flash
-//! through OpenCode Go. It answers in a sentence and may call the same island actions
-//! (timer, tasks, water, music, volume); the frontend runs those.
-//!
-//! The API key comes from the OPENCODE_API_KEY environment variable, or from
-//! `opencode_key.txt` in the app's config folder.
+//! When a spoken request isn't one of the built-in commands, Choco asks the AI service in use
+//! (ai.rs: DeepSeek V4.1 Flash through OpenCode Go, OpenAI or Gemini). It answers in a sentence
+//! and may call the same island actions (timer, tasks, water, music, volume); the frontend
+//! runs those.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
-pub(crate) const URL: &str = "https://opencode.ai/inference/go/openai/v1/chat/completions";
-pub(crate) const MODEL: &str = "deepseek-v4.1-flash";
+use crate::ai::{Job, Provider};
 
 const SYSTEM: &str = "You are Choco, a calm, warm little assistant that lives in the notch at the top of \
 the user's Windows screen. The user's words come from speech-to-text, so allow for misheard words. \
@@ -39,52 +36,15 @@ pub struct Action {
     input: Value,
 }
 
-fn key_file(app: &AppHandle) -> Option<std::path::PathBuf> {
-    Some(app.path().app_config_dir().ok()?.join("opencode_key.txt"))
-}
-
-pub(crate) fn api_key(app: &AppHandle) -> Option<String> {
-    if let Ok(k) = std::env::var("OPENCODE_API_KEY") {
-        if !k.trim().is_empty() {
-            return Some(k.trim().to_string());
-        }
-    }
-    let k = std::fs::read_to_string(key_file(app)?).ok()?;
-    (!k.trim().is_empty()).then(|| k.trim().to_string())
-}
-
-#[tauri::command]
-pub fn choco_key_status(app: AppHandle) -> bool {
-    api_key(&app).is_some()
-}
-
-/// Saves the key from settings; an empty key removes it.
-#[tauri::command]
-pub fn choco_set_key(app: AppHandle, key: String) -> Result<(), String> {
-    let file = key_file(&app).ok_or("no config folder")?;
-    if key.trim().is_empty() {
-        let _ = std::fs::remove_file(file);
-        return Ok(());
-    }
-    std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::write(file, key.trim()).map_err(|e| e.to_string())
-}
-
-fn tool(name: &str, description: &str, properties: Value) -> Value {
+/// A function tool in OpenAI's format. Every property is required; a tool without any has no
+/// parameters at all (Gemini turns away an empty object schema).
+pub(crate) fn tool(name: &str, description: &str, properties: Value) -> Value {
     let required: Vec<&String> = properties.as_object().map(|o| o.keys().collect()).unwrap_or_default();
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": false,
-            },
-        },
-    })
+    let mut function = json!({ "name": name, "description": description });
+    if !required.is_empty() {
+        function["parameters"] = json!({ "type": "object", "properties": properties, "required": required });
+    }
+    json!({ "type": "function", "function": function })
 }
 
 fn tools() -> Value {
@@ -136,36 +96,35 @@ pub async fn choco_ask(
     history: Vec<Turn>,
     session: String,
 ) -> Result<Answer, String> {
-    let key = api_key(&app).ok_or("no-key")?;
+    let (provider, key) = crate::ai::chosen(&app).ok_or("no-key")?;
     let memory = crate::memory::prompt(&app);
     let mut messages = vec![json!({ "role": "system", "content": format!("{SYSTEM}\n\n{memory}\n\n{context}") })];
     for t in history {
         messages.push(json!({ "role": t.role, "content": t.content }));
     }
     messages.push(json!({ "role": "user", "content": text }));
-    let body = json!({
-        "model": MODEL,
-        "max_tokens": 1024,
+    let mut body = json!({
+        "model": provider.model(&app, Job::Chat),
         "messages": messages,
         "tools": tools(),
         "tool_choice": "auto",
     });
-
-    // Go routes and caches by conversation.
-    let res = reqwest::Client::new()
-        .post(URL)
+    let mut req = reqwest::Client::new()
+        .post(provider.chat_url())
         .bearer_auth(key)
-        .header("x-opencode-session", session)
-        .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("network: {e}"))?;
+        .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")));
+    // OpenAI's newer models refuse max_tokens; the prompt keeps replies short anyway.
+    if provider == Provider::Opencode {
+        body["max_tokens"] = json!(1024);
+        // Go routes and caches by conversation.
+        req = req.header("x-opencode-session", session);
+    }
+
+    let res = req.json(&body).send().await.map_err(|e| format!("network: {e}"))?;
     let status = res.status();
     let msg: Value = res.json().await.map_err(|e| format!("bad response: {e}"))?;
     if !status.is_success() {
-        let detail = msg["error"]["message"].as_str().unwrap_or("request failed");
-        return Err(format!("{}: {detail}", status.as_u16()));
+        return Err(format!("{}: {}", status.as_u16(), crate::ai::error_message(&msg)));
     }
 
     let message = &msg["choices"][0]["message"];

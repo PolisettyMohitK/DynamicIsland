@@ -2,6 +2,7 @@
   // Everything you can change, in one quiet sheet inside the island.
   import { invoke } from '@tauri-apps/api/core';
   import { disable, enable, isEnabled } from '@tauri-apps/plugin-autostart';
+  import { aiStatus, providerName, setKey, type AiStatus } from '$lib/ai';
   import { choco, type Sensitivity } from '$lib/choco.svelte';
   import { focus, LENGTH } from '$lib/focus.svelte';
   import { pet, type Distance, type Energy } from '$lib/pet.svelte';
@@ -36,7 +37,8 @@
   const minutes = (ms: number) => Math.round(ms / 60_000);
 
   let mics = $state<string[]>([]);
-  let hasKey = $state(false);
+  let ai = $state<AiStatus | null>(null);
+  const hasKey = $derived(!!ai?.services[ai.provider].key);
   let editingKey = $state(false);
   let keyText = $state('');
   let keyField = $state<HTMLInputElement>();
@@ -44,7 +46,7 @@
 
   $effect(() => {
     invoke<string[]>('choco_mics').then((m) => (mics = m));
-    invoke<boolean>('choco_key_status').then((k) => (hasKey = k));
+    aiStatus().then((s) => (ai = s));
     isEnabled().then((on) => (autostart = on)).catch(() => {});
   });
 
@@ -66,9 +68,9 @@
     const k = keyText.trim();
     editingKey = false;
     stopTyping();
-    if (!k) return;
-    await invoke('choco_set_key', { key: k });
-    hasKey = await invoke<boolean>('choco_key_status');
+    if (!k || !ai) return;
+    await setKey(ai.provider, k);
+    ai = await aiStatus();
   }
 
   async function setAutostart(on: boolean) {
@@ -101,7 +103,7 @@
         <Toggle label="Listen for a follow-up" on={choco.settings.followUps} onchange={(on) => choco.set({ followUps: on })} />
       </div>
       <div class="row">
-        <span>OpenCode key</span>
+        <span title="Pick the service and models on the dashboard">{ai ? providerName(ai.provider) : 'AI'} key</span>
         {#if editingKey}
           <input
             bind:this={keyField}
@@ -131,11 +133,11 @@
       <h3>Focus</h3>
       <div class="row">
         <span>Focus</span>
-        <Stepper label="focus length" value="{minutes(LENGTH.focus)} min" onstep={(s) => focus.setLength('focus', Math.min(90, Math.max(5, minutes(LENGTH.focus) + s * 5)))} />
+        <Stepper label="focus length" value="{minutes(LENGTH.focus)} min" onstep={(s) => focus.setLength('focus', minutes(LENGTH.focus) + s * 5)} />
       </div>
       <div class="row">
         <span>Break</span>
-        <Stepper label="break length" value="{minutes(LENGTH.break)} min" onstep={(s) => focus.setLength('break', Math.min(30, Math.max(1, minutes(LENGTH.break) + s)))} />
+        <Stepper label="break length" value="{minutes(LENGTH.break)} min" onstep={(s) => focus.setLength('break', minutes(LENGTH.break) + s)} />
       </div>
 
       <h3>Water</h3>
@@ -158,7 +160,7 @@
         <div class="row"><span>Energy</span><Segmented options={ENERGIES} value={pet.settings.energy} onchange={(v) => pet.set({ energy: v })} /></div>
         <div class="row">
           <span>Sleeps after</span>
-          <Stepper label="sleep after" value="{pet.settings.sleepAfterMin} min" onstep={(st) => pet.set({ sleepAfterMin: Math.min(10, Math.max(1, pet.settings.sleepAfterMin + st)) })} />
+          <Stepper label="sleep after" value="{pet.settings.sleepAfterMin} min" onstep={(st) => pet.set({ sleepAfterMin: pet.settings.sleepAfterMin + st })} />
         </div>
         <div class="row"><span>Sleeps at night</span><Toggle label="Sleep at night" on={pet.settings.nightSleep} onchange={(on) => pet.set({ nightSleep: on })} /></div>
         <div class="row"><span>Sounds</span><Toggle label="Pet sounds" on={pet.settings.sounds} onchange={(on) => pet.set({ sounds: on })} /></div>

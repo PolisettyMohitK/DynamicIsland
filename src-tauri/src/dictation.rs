@@ -13,6 +13,8 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
+use crate::ai::{Job, Provider};
+
 /// Held this long with nothing else pressed before it counts as dictation, so
 /// Right Ctrl shortcuts (Ctrl+C) never start it.
 const HOLD: Duration = Duration::from_millis(300);
@@ -123,32 +125,25 @@ fn dictate(app: &AppHandle) -> Result<Option<String>, String> {
 
 /// The text cleaned up by the model, or None (no key, slow, offline) to use it as heard.
 async fn tidy(app: &AppHandle, raw: &str) -> Option<String> {
-    let key = crate::ask::api_key(app)?;
+    let (provider, key) = crate::ai::chosen(app)?;
     let body = json!({
-        "model": crate::ask::MODEL,
+        "model": provider.model(app, Job::Chat),
         "max_tokens": 1024,
         "messages": [
             { "role": "system", "content": TIDY },
             { "role": "user", "content": raw },
         ],
     });
-    let res = reqwest::Client::new()
-        .post(crate::ask::URL)
+    let mut req = reqwest::Client::new()
+        .post(provider.chat_url())
         .bearer_auth(key)
+        .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")));
+    if provider == Provider::Opencode {
         // Go routes by conversation; each dictation is its own.
-        .header(
-            "x-opencode-session",
-            format!(
-                "choco-dictation-{}",
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
-            ),
-        )
-        .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")))
-        .timeout(TIDY_TIMEOUT)
-        .json(&body)
-        .send()
-        .await
-        .ok()?;
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        req = req.header("x-opencode-session", format!("choco-dictation-{ms}"));
+    }
+    let res = req.timeout(TIDY_TIMEOUT).json(&body).send().await.ok()?;
     let msg: serde_json::Value = res.error_for_status().ok()?.json().await.ok()?;
     let text = msg["choices"][0]["message"]["content"].as_str()?.trim();
     (!text.is_empty()).then(|| text.to_string())
