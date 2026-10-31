@@ -4,7 +4,7 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use sysinfo::{Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 #[derive(Serialize, Default)]
@@ -38,12 +38,16 @@ pub struct App {
 struct Sampler {
     sys: System,
     networks: Networks,
+    disks: Disks,
+    disks_at: Instant,
     last: Instant,
     gpu: Option<gpu::Gpu>,
 }
 
 static SAMPLER: Mutex<Option<Sampler>> = Mutex::new(None);
 const TOP: usize = 4;
+/// Free space barely moves; reading every drive each second is wasted work.
+const DISK_EVERY: Duration = Duration::from_secs(10);
 
 #[tauri::command]
 pub async fn stats_read() -> Stats {
@@ -60,6 +64,8 @@ fn read() -> Stats {
     let s = guard.get_or_insert_with(|| Sampler {
         sys: System::new_with_specifics(RefreshKind::nothing()),
         networks: Networks::new_with_refreshed_list(),
+        disks: Disks::new_with_refreshed_list(),
+        disks_at: Instant::now(),
         last: Instant::now(),
         gpu: gpu::Gpu::open(),
     });
@@ -82,7 +88,11 @@ fn read() -> Stats {
     top.truncate(TOP);
 
     // The system drive.
-    let disks = Disks::new_with_refreshed_list();
+    if s.disks_at.elapsed() >= DISK_EVERY {
+        s.disks.refresh(false);
+        s.disks_at = Instant::now();
+    }
+    let disks = &s.disks;
     let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
     let disk = disks
         .iter()

@@ -144,8 +144,14 @@ mod imp {
     const TICKS_PER_MS: f64 = 10_000.0;
     const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000; // 1601 -> 1970 in 100ns ticks
 
+    /// Made once: asking Windows for a new one each poll is a round trip to another process.
     fn session() -> Option<Session> {
-        Manager::RequestAsync().ok()?.get().ok()?.GetCurrentSession().ok()
+        static MANAGER: std::sync::OnceLock<Option<Manager>> = std::sync::OnceLock::new();
+        MANAGER
+            .get_or_init(|| Manager::RequestAsync().ok()?.get().ok())
+            .as_ref()?
+            .GetCurrentSession()
+            .ok()
     }
 
     pub fn current() -> Option<Media> {

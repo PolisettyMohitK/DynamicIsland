@@ -381,9 +381,9 @@
     if (!hovered && (mode === 'idle' || mode === 'live') && mode !== rest) mode = rest;
   });
 
-  // Keep the music position (and so the current lyric) moving while it can be seen.
+  // Keep the music position (and so the current lyric) moving while it plays and can be seen.
   $effect(() => {
-    if (mode === 'idle') return;
+    if (mode === 'idle' || !nowPlaying.media?.playing) return;
     const id = setInterval(() => (nowPlaying.now = Date.now()), 200);
     return () => clearInterval(id);
   });

@@ -1,7 +1,10 @@
 // Control Centre > Wallpaper: the person's own Pictures\Wallpapers folder, then the ones
 // Windows ships. Thumbnails are shrunk here, so the webview never loads a full-size image.
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 const EXTS: [&str; 5] = ["jpg", "jpeg", "png", "bmp", "webp"];
 const MAX: usize = 48;
@@ -40,8 +43,22 @@ pub async fn wallpaper_list() -> Result<Vec<Wall>, String> {
 /// A small JPEG/PNG of the image as a data URL.
 #[tauri::command]
 pub async fn wallpaper_thumb(path: String) -> Result<String, String> {
-    blocking(move || imp::thumb(&path)).await
+    blocking(move || {
+        // Kept for the run (at most MAX small PNGs, a few MB) so the tab opens filled.
+        // The file's modified time is in the key, so an edited image gets a new thumbnail.
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let key = (path.clone(), modified);
+        if let Some(t) = THUMBS.lock().unwrap().get(&key) {
+            return Ok(t.clone());
+        }
+        let thumb = imp::thumb(&path)?;
+        THUMBS.lock().unwrap().insert(key, thumb.clone());
+        Ok(thumb)
+    })
+    .await
 }
+
+static THUMBS: LazyLock<Mutex<HashMap<(String, Option<SystemTime>), String>>> = LazyLock::new(Default::default);
 
 #[tauri::command]
 pub async fn wallpaper_set(path: String) -> Result<(), String> {

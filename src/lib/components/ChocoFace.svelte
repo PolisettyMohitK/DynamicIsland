@@ -21,6 +21,9 @@
 </script>
 
 {#key beat}
+  <!-- Whole-face moves (breath, bob) and the z live on HTML boxes, which the GPU moves on its
+       own; moving shapes inside the SVG would lay it out again every frame. -->
+  <span class="choco {mood}" style="--size: {size}px">
   <svg
     class="face {mood}"
     class:alt={beat % 2 === 1}
@@ -46,13 +49,17 @@
       <ellipse class="nose" cx="20" cy="15.3" rx="1.9" ry="1.3" />
       <path class="mouth" d="M18.1 17.5q.95.9 1.9 0q.95.9 1.9 0" />
     </g>
-    {#if mood === 'sleep'}
-      <text class="z" x="33" y="7">z</text>
-    {/if}
   </svg>
+  {#if mood === 'sleep'}<span class="z">z</span>{/if}
+  </span>
 {/key}
 
 <style>
+  .choco {
+    position: relative;
+    display: block;
+    flex: none;
+  }
   .face {
     display: block;
     flex: none;
@@ -117,7 +124,8 @@
   }
 
   /* Asleep: a slow breath and a drifting z. */
-  .sleep .head {
+  .choco.sleep {
+    transform-origin: 50% 58%;
     animation: breathe 3s ease-in-out;
   }
   .sleep .ear {
@@ -128,9 +136,14 @@
       transform: translateY(0.6px) scale(0.98);
     }
   }
+  /* Where the SVG's z sat: x 33, baseline 7 of the 40×24 face. */
   .z {
-    fill: currentColor;
-    font: 600 6px var(--font);
+    position: absolute;
+    left: 82.5%;
+    top: 0;
+    color: var(--text);
+    font: 600 calc(var(--size) / 4) / 1 var(--font);
+    pointer-events: none;
     opacity: 0;
     animation: z 3s ease-out;
   }
@@ -193,7 +206,8 @@
   }
 
   /* Music: bobs along for a few beats. */
-  .vibe .head {
+  .choco.vibe {
+    transform-origin: 50% 58%;
     animation: bob 0.9s ease-in-out 2;
   }
   .vibe .ear {
