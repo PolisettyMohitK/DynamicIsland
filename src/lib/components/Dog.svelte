@@ -27,7 +27,9 @@
   // Choco, full body, side on: a chibi dog in the same line-art as the face in the island
   // (floppy ear, dot eye, small nose). Light fur with a dark outline so it reads on any
   // wallpaper. Faces right; the page flips it.
-  let { pose, act }: { pose: Pose; act: Act } = $props();
+  // slope: how far it leans while moving, in degrees; negative climbs up the screen, positive
+  // heads down it. Steep enough and the stride changes too.
+  let { pose, act, slope = 0 }: { pose: Pose; act: Act; slope?: number } = $props();
 
   // Head, drawn once and moved per pose: round skull, a short muzzle with a little stop.
   const HEAD = 'M50 7C44 7 40 11.5 40 17s4 10 10 10c3.5 0 6-.8 9-1.4 3.7-.8 6-2.6 6-4.8 0-2.6-2.2-4-5-4.2C59.3 11.6 55.6 7 50 7Z';
@@ -53,8 +55,16 @@
   </g>
 {/snippet}
 
-<svg class="dog {pose} {act}" viewBox="0 0 70 54" aria-hidden="true">
+<svg
+  class="dog {pose} {act}"
+  class:up={slope <= -12}
+  class:down={slope >= 12}
+  style="--slope: {slope}deg"
+  viewBox="0 0 70 54"
+  aria-hidden="true"
+>
   <ellipse class="shadow" cx="34" cy="50.6" rx={pose === 'lie' ? 22 : pose === 'sit' ? 15 : 17} ry="2.2" />
+  <g class="tilt">
   {#key pose}
     <g class="settle">
       <g class="whole">
@@ -106,6 +116,7 @@
       </g>
     </g>
   {/key}
+  </g>
 </svg>
 
 <style>
@@ -303,6 +314,68 @@
     }
     50% {
       transform: rotate(-12deg);
+    }
+  }
+
+  /* ---- Up and down the screen ---- */
+  /* It leans by the angle it's travelling at, gliding between angles as the path bends; the
+     head turns back about halfway so it keeps looking where it's going. Steep up: ear streaming
+     back, a longer reaching stride. Steep down: shorter careful steps. */
+  .tilt {
+    transform-origin: 34px 48px;
+    transition: transform 220ms ease-out;
+  }
+  .walk .tilt,
+  .run .tilt {
+    transform: rotate(var(--slope));
+  }
+  .walk .head,
+  .run .head {
+    transform: rotate(calc(var(--slope) * -0.45));
+  }
+  .walk.up .ear {
+    animation-name: flop-back;
+  }
+  @keyframes flop-back {
+    from {
+      transform: rotate(-14deg);
+    }
+    to {
+      transform: rotate(-24deg);
+    }
+  }
+  .walk.up .leg.a,
+  .walk.up .leg.b {
+    animation-name: reach;
+  }
+  @keyframes reach {
+    0%,
+    100% {
+      transform: rotate(24deg);
+    }
+    50% {
+      transform: rotate(-24deg);
+    }
+  }
+  .walk.down .leg.a,
+  .walk.down .leg.b {
+    animation-name: step;
+  }
+  @keyframes step {
+    0%,
+    100% {
+      transform: rotate(11deg);
+    }
+    50% {
+      transform: rotate(-11deg);
+    }
+  }
+  .walk.down .whole {
+    animation-name: bob-down;
+  }
+  @keyframes bob-down {
+    to {
+      transform: translateY(-0.6px);
     }
   }
 

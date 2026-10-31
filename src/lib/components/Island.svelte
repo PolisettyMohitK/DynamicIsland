@@ -16,7 +16,8 @@
   import { status } from '$lib/status.svelte';
   import { mmss } from '$lib/store';
   import { todos } from '$lib/todos.svelte';
-  import { ui } from '$lib/ui.svelte';
+  import { serveSettings } from '$lib/settings-host.svelte';
+  import { setLyrics, ui } from '$lib/ui.svelte';
   import { water } from '$lib/water.svelte';
   import { ISLAND_TOP, type Shape } from '$lib/glass';
   import Answer from './Answer.svelte';
@@ -89,7 +90,7 @@
   let direction = $state(1);
   let popup = $state<Popup>({ icon: 'caps', label: '' });
 
-  let lyricsOn = $state(loadLyricsOn());
+  const lyricsOn = $derived(ui.lyricsOn);
   let answerH = $state(0);
   let settingsH = $state(0);
   let controlH = $state(0);
@@ -166,21 +167,8 @@
     return hour >= NIGHT.from || hour < NIGHT.to;
   }
 
-  function loadLyricsOn() {
-    try {
-      return localStorage.getItem('lyricsOn') === 'true';
-    } catch {
-      return false;
-    }
-  }
-
   function toggleLyrics() {
-    lyricsOn = !lyricsOn;
-    try {
-      localStorage.setItem('lyricsOn', String(lyricsOn));
-    } catch {
-      // not remembered across restarts; fine
-    }
+    setLyrics(!ui.lyricsOn);
   }
 
   /** Run a timeline of [mode, atMs] steps, cancelling whatever timeline was running.
@@ -389,6 +377,7 @@
   });
 
   $effect(() => nowPlaying.start());
+  $effect(() => serveSettings());
 
   $effect(() => {
     const unlisten = [

@@ -1,7 +1,7 @@
 //! Circle to ask: Ctrl+Shift+Space dims the screen; draw around anything, then ask about it
-//! out loud or by typing. The circled part goes to Claude Haiku 5.5 (through OpenCode Go,
-//! like computer use) with the question, and the answer appears next to the circle.
-//! The shortcut is off in game mode.
+//! out loud or by typing. The circled part goes with the question to the computer-use model of
+//! the AI service in use (ai.rs; Claude Haiku 5.5 through OpenCode Go), and the answer appears
+//! next to the circle. The shortcut is off in game mode.
 //!
 //! Events to the overlay: `circle-open`, `circle-level` 0–1 while listening.
 
@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-const URL: &str = "https://opencode.ai/inference/go/anthropic/v1/messages";
-const MODEL: &str = "claude-haiku-5-5";
+use crate::ai::{Job, Provider};
+use crate::computer::CLAUDE_URL;
+
 /// The circled part goes out at most this many pixels on its long side.
 const MAX_SIDE: i32 = 1024;
 const SYSTEM: &str = "The user circled part of their Windows screen and asked about it. The image is \
@@ -149,7 +150,7 @@ fn listen(app: &AppHandle) -> Result<String, String> {
 /// `x, y, w, h`: the circled area in physical pixels, relative to the overlay window.
 #[tauri::command]
 pub async fn circle_ask(app: AppHandle, window: WebviewWindow, x: i32, y: i32, w: i32, h: i32, question: String) -> Result<String, String> {
-    let key = crate::ask::api_key(&app).ok_or("Add an OpenCode key in Choco's settings first.")?;
+    let (provider, key) = crate::ai::chosen(&app).ok_or("Add an AI key on the dashboard first.")?;
     let origin = window.outer_position().map_err(|e| e.to_string())?;
     let (w, h) = (w.max(8), h.max(8));
     let scale = (MAX_SIDE as f32 / w.max(h) as f32).min(1.0);
@@ -162,42 +163,64 @@ pub async fn circle_ask(app: AppHandle, window: WebviewWindow, x: i32, y: i32, w
     .map_err(|e| e.to_string())?;
 
     let question = if question.trim().is_empty() { "What is this?".to_string() } else { question };
-    let body = json!({
-        "model": MODEL,
-        "max_tokens": 1024,
-        "system": SYSTEM,
-        "messages": [{
-            "role": "user",
-            "content": [
-                { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": png } },
-                { "type": "text", "text": question },
+    let model = provider.model(&app, Job::Computer);
+    let client = reqwest::Client::new();
+    let req = if provider == Provider::Opencode {
+        client
+            .post(CLAUDE_URL)
+            .header("x-api-key", key)
+            // Go routes by conversation; each question is its own.
+            .header("x-opencode-session", format!("choco-circle-{}", now_ms()))
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": model,
+                "max_tokens": 1024,
+                "system": SYSTEM,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        { "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": png } },
+                        { "type": "text", "text": question },
+                    ],
+                }],
+            }))
+    } else {
+        client.post(provider.chat_url()).bearer_auth(key).json(&json!({
+            "model": model,
+            "max_tokens": 1024,
+            "messages": [
+                { "role": "system", "content": SYSTEM },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "image_url", "image_url": { "url": format!("data:image/png;base64,{png}") } },
+                        { "type": "text", "text": question },
+                    ],
+                },
             ],
-        }],
-    });
-    let res = reqwest::Client::new()
-        .post(URL)
-        .header("x-api-key", key)
-        // Go routes by conversation; each question is its own.
-        .header("x-opencode-session", format!("choco-circle-{}", now_ms()))
-        .header("anthropic-version", "2023-06-01")
+        }))
+    };
+    let res = req
         .header("user-agent", concat!("dynamic-island-choco/", env!("CARGO_PKG_VERSION")))
-        .json(&body)
         .send()
         .await
         .map_err(|e| format!("network: {e}"))?;
     let status = res.status();
     let msg: serde_json::Value = res.json().await.map_err(|e| format!("bad response: {e}"))?;
     if !status.is_success() {
-        let detail = msg["error"]["message"].as_str().unwrap_or("request failed");
-        return Err(format!("{}: {detail}", status.as_u16()));
+        return Err(format!("{}: {}", status.as_u16(), crate::ai::error_message(&msg)));
     }
-    let text = msg["content"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|b| b["text"].as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let text = if provider == Provider::Opencode {
+        msg["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        msg["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string()
+    };
     Ok(text.trim().to_string())
 }
 
