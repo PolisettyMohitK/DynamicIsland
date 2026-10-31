@@ -86,6 +86,19 @@ fn tools() -> Value {
     ])
 }
 
+/// Gemini turns away an empty parameter schema, but OpenCode's models need one on every tool.
+fn tools_for(provider: Provider) -> Value {
+    let mut tools = tools();
+    if provider != Provider::Gemini {
+        for t in tools.as_array_mut().into_iter().flatten() {
+            if t["function"].get("parameters").is_none() {
+                t["function"]["parameters"] = json!({ "type": "object", "properties": {} });
+            }
+        }
+    }
+    tools
+}
+
 /// `context` is a line about the user's current state (time, what's playing, the timer).
 /// `history` is the conversation so far; `session` stays the same across a conversation.
 #[tauri::command]
@@ -106,7 +119,7 @@ pub async fn choco_ask(
     let mut body = json!({
         "model": provider.model(&app, Job::Chat),
         "messages": messages,
-        "tools": tools(),
+        "tools": tools_for(provider),
         "tool_choice": "auto",
     });
     let mut req = reqwest::Client::new()

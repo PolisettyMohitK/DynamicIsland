@@ -44,8 +44,9 @@ const MODELS: [(&str, &str); 5] = [
     ("moonshine_tokenizer.json", "{MOON}/tokenizer.json"),
 ];
 
-/// Recording ends after this much quiet once you've started talking.
-const END_SILENCE: Duration = Duration::from_millis(800);
+/// Recording ends after this much quiet once you've started talking. Long enough for the
+/// pause while you think of the next word.
+const END_SILENCE: Duration = Duration::from_millis(1200);
 /// Give up if nothing is said this long after the wake word.
 const NO_SPEECH: Duration = Duration::from_secs(5);
 /// After an answer Choco listens a little for a follow-up, without the wake word.
@@ -56,6 +57,9 @@ const PREVIEW_EVERY: Duration = Duration::from_millis(600);
 /// Speech is louder than this share of the loudest moment of the command; anything quieter is
 /// the room, so steady noise can't keep a command open.
 const VOICE_OF_PEAK: f32 = 0.2;
+/// Speech is at least this loud (int16 scale). Laptop mic arrays are quiet: a room sits near
+/// 30 and soft speech near 150, so a higher bar drops words.
+const MIN_VOICE: f32 = 120.0;
 /// After this much quiet the command is probably over, so it's turned into text while the
 /// rest of END_SILENCE runs out; the answer is ready the moment listening stops.
 const SETTLED: Duration = Duration::from_millis(400);
@@ -101,7 +105,20 @@ enum Event {
 }
 
 fn emit(app: &AppHandle, e: Event) {
+    if let Event::Error { message } = &e {
+        log_error(app, message);
+    }
     let _ = app.emit("choco", e);
+}
+
+/// Errors only flash by on the island; choco-errors.log keeps them to look at later.
+fn log_error(app: &AppHandle, message: &str) {
+    use std::io::Write;
+    let Ok(dir) = app.path().app_local_data_dir() else { return };
+    let when = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("choco-errors.log")) {
+        let _ = writeln!(f, "{when} {message}");
+    }
 }
 
 pub fn spawn(app: AppHandle) {
@@ -375,7 +392,7 @@ impl Command {
     fn push(&mut self, chunk: &[f32], level: f32, floor: f32) -> Option<Option<Vec<f32>>> {
         self.audio.extend_from_slice(chunk);
         self.peak = self.peak.max(level);
-        if level > (floor * 2.5).max(300.0).max(self.peak * VOICE_OF_PEAK) {
+        if level > (floor * 3.0).max(MIN_VOICE).max(self.peak * VOICE_OF_PEAK) {
             self.last_voice = Some(Instant::now());
         }
         match self.last_voice {
@@ -804,6 +821,28 @@ mod tests {
         for (a, g) in always[start..].iter().zip(&gated[start..]) {
             assert!((a - g).abs() < 0.02, "{a} vs {g}");
         }
+    }
+
+    /// Soft speech on a quiet laptop mic, with a thinking pause mid-sentence, is kept whole.
+    #[test]
+    fn quiet_speech_with_a_pause() {
+        let room = 30.0;
+        let mut c = Command { audio: Vec::new(), started: Instant::now(), last_voice: None, peak: 0.0, last_preview: Instant::now(), patience: NO_SPEECH };
+        let chunk = vec![0.0; CHUNK];
+        let say = |c: &mut Command, level: f32, ms: u64| {
+            let end = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < end {
+                if let Some(done) = c.push(&chunk, level, room) {
+                    return Some(done);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            None
+        };
+        assert!(say(&mut c, 180.0, 600).is_none(), "ended while talking");
+        assert!(say(&mut c, room, 900).is_none(), "ended in a short pause");
+        assert!(say(&mut c, 160.0, 400).is_none(), "ended while talking again");
+        assert!(matches!(say(&mut c, room, 2000), Some(Some(_))), "didn't end after going quiet");
     }
 
     /// How long a command takes to become text, with the quiet a real one ends with.

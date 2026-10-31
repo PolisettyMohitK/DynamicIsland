@@ -191,10 +191,10 @@
     gap: 4px;
   }
   .tab {
-    height: 26px;
+    height: 32px;
     padding: 0 12px;
     border: none;
-    border-radius: 13px;
+    border-radius: 16px;
     background: none;
     color: var(--text-faint);
     font: 600 12px var(--font);

@@ -19,7 +19,7 @@
   /* Text */
   --text: #ffffff;
   --text-dim: rgba(255, 255, 255, 0.58);
-  --text-faint: rgba(255, 255, 255, 0.34);
+  --text-faint: rgba(255, 255, 255, 0.5);
   --font: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   --font-display: 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif;
 
@@ -80,6 +80,12 @@ body {
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+/* Keyboard focus shows; mouse clicks don't. */
+:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
 }
 
 /* Windows "Animation effects" off: no CSS movement. Svelte fades still play. */
