@@ -15,6 +15,8 @@ mod stats;
 mod apps;
 mod clipboard;
 mod wallpaper;
+mod dictation;
+mod circle;
 mod game;
 mod island;
 mod choco;
@@ -64,6 +66,8 @@ pub fn run() {
             let quiet = std::env::args().any(|a| a == dashboard::QUIET_START);
             dashboard::create(app.handle(), !quiet)?;
             clipboard::start(app.handle().clone());
+            dictation::spawn(app.handle().clone());
+            circle::spawn(app.handle().clone());
 
             let open = MenuItem::with_id(app, "dashboard", "Open dashboard", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle", "Hide island", true, None::<&str>)?;
@@ -130,6 +134,11 @@ pub fn run() {
             wallpaper::wallpaper_thumb,
             wallpaper::wallpaper_set,
             wallpaper::wallpaper_open_folder,
+            dictation::dictation_set_enabled,
+            circle::circle_close,
+            circle::circle_stop_listening,
+            circle::circle_listen,
+            circle::circle_ask,
             pet::pet_configure,
             pet::pet_config,
             pet::pet_wake,

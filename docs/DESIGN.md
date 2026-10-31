@@ -119,6 +119,12 @@ Navigation: `‹` and `›` circular buttons on the left/right edges, page dots 
 - **Power**: lock, sleep, sign out, restart, shut down. The last three need a second click within 3s.
 - **How** (`src-tauri/src/control.rs`): WinRT radios, the Personalize registry keys plus a `WM_SETTINGCHANGE` broadcast, WMI brightness, the undocumented `IPolicyConfig` for the default output (what EarTrumpet uses), `shutdown.exe`. State is read when it opens; nothing polls.
 
+## 4h. Dictation and Circle to ask
+
+Both are off while a game runs, and both find their keys by polling every 40–50ms instead of a system-wide keyboard hook.
+- **Dictation** (`dictation.rs`): hold Right Ctrl on its own for 300ms anywhere, talk, then let go. Pressing any other key while holding cancels it, so Ctrl shortcuts never trigger it. Moonshine transcribes on this machine, sharing the copy "Hey Choco" uses. If the AI service in use has a key, its chat model tidies the text (fillers, self-corrections, punctuation) with a 6s limit; without it, the raw text is used. The text is typed into the focused app with `SendInput`. The island shows a mic, the level, then what was typed. There's an on/off toggle in Settings.
+- **Circle to ask** (`circle.rs`, `routes/circle`): Ctrl+Shift+Space opens a dimmed overlay on the monitor the cursor is on. You draw around something and the inside stays bright. The overlay listens for a question right away; typing takes over. The circled area is grabbed from the real screen (the overlay is excluded from capture) and sent with the question to the service's computer-use model (Claude Haiku 5.5 on OpenCode). The answer appears in a card next to the circle, and Esc closes it.
+
 ## 5. Build order
 
 1. Shell: states + morph + window resizing + acrylic + top-edge anchoring + hide on full-screen + tray menu.

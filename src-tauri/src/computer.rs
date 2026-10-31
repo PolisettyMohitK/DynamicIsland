@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 use crate::ai::{Job, Provider};
 use crate::ask::tool;
 
-const CLAUDE_URL: &str = "https://opencode.ai/inference/go/anthropic/v1/messages";
+pub(crate) const CLAUDE_URL: &str = "https://opencode.ai/inference/go/anthropic/v1/messages";
 /// Screenshots kept in an OpenAI / Gemini conversation; older ones are dropped.
 const KEEP_SHOTS: usize = 2;
 /// Screenshots go out this wide (the height keeps the screen's shape); the model's
@@ -468,7 +468,7 @@ pub enum Done {
     Text(String),
 }
 
-fn png_base64(rgba: &[u8], w: i32, h: i32) -> String {
+pub(crate) fn png_base64(rgba: &[u8], w: i32, h: i32) -> String {
     let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
     let mut out = Vec::new();
     {

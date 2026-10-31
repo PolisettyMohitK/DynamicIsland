@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the island, pet and dashboard windows",
-  "windows": ["main", "pet", "dashboard"],
+  "description": "Capability for the island, pet, dashboard and circle windows",
+  "windows": ["main", "pet", "dashboard", "circle"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

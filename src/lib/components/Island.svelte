@@ -9,6 +9,7 @@
   import { clock } from '$lib/clock.svelte';
   import { focus, LABEL } from '$lib/focus.svelte';
   import { choco } from '$lib/choco.svelte';
+  import { dictation } from '$lib/dictation.svelte';
   import { nowPlaying } from '$lib/media.svelte';
   import { pet } from '$lib/pet.svelte';
   import { shelf } from '$lib/shelf.svelte';
@@ -39,7 +40,7 @@
   import WaterPage from './pages/WaterPage.svelte';
 
   /** idle and live are resting states (cursor away); the rest are shown on hover or for events. */
-  type Mode = 'idle' | 'live' | 'peek' | 'expanded' | 'popup' | 'voice' | 'work' | 'answer' | 'settings' | 'control';
+  type Mode = 'idle' | 'live' | 'peek' | 'expanded' | 'popup' | 'voice' | 'dictate' | 'work' | 'answer' | 'settings' | 'control';
 
   // Size of each state in logical px; r is the radius of the bottom corners.
   // `wide` is the expanded island with the lyrics column open. Answers and settings
@@ -52,6 +53,7 @@
     wide: { w: 675, h: 180, r: 32 },
     popup: { w: 425, h: 36, r: 18 },
     voice: { w: 320, h: 44, r: 22 },
+    dictate: { w: 320, h: 44, r: 22 },
     work: { w: 440, h: 44, r: 22 },
   };
   /** The resting pill while the pet is out on the desktop: its empty bed. */
@@ -128,7 +130,9 @@
               : SHAPES[mode],
   );
   const voice = $derived(mode === 'voice' || mode === 'work' || mode === 'answer');
-  const grow = $derived(mode === 'expanded' || mode === 'settings' || mode === 'control' || mode === 'popup' || mode === 'live' || voice);
+  const grow = $derived(
+    mode === 'expanded' || mode === 'settings' || mode === 'control' || mode === 'popup' || mode === 'live' || mode === 'dictate' || voice,
+  );
   /** Where the island settles when nothing else is going on. */
   const rest = $derived<Mode>(focus.running || (nowPlaying.media?.playing && lyricsOn) ? 'live' : 'idle');
   /** A running focus timer takes the live bar over from music. */
@@ -183,6 +187,7 @@
       choco.hold(true);
       return;
     }
+    if (dictation.state !== 'idle') return;
     // Back in during the leave grace: stay open.
     if (mode === 'expanded' || mode === 'settings' || mode === 'control') {
       play();
@@ -196,7 +201,7 @@
     hovered = false;
     choco.hold(false);
     // Typing into a field keeps the island open until the field is done.
-    if (ui.typing || choco.busy) return;
+    if (ui.typing || choco.busy || dictation.state !== 'idle') return;
     if (missed) {
       // Something happened while the island was open; show it now instead of collapsing.
       const p = missed;
@@ -334,6 +339,16 @@
     });
   });
   $effect(() => onPopup(showPopup));
+
+  // Dictation shows on the island while it records and types, then hands it back.
+  $effect(() => dictation.start());
+  $effect(() => {
+    const busy = dictation.state !== 'idle';
+    untrack(() => {
+      if (busy) play(['dictate', 0]);
+      else if (mode === 'dictate') play([hovered ? 'expanded' : 'rest', 0]);
+    });
+  });
 
   // Files dragged over the island open the shelf; dropping parks them there.
   $effect(() => {
@@ -498,6 +513,17 @@
       {#key choco.heard}
         <span class="said" class:waiting={!choco.heard} in:fade={{ duration: 220 }}>
           {choco.heard || (thinking ? '' : 'Listening')}
+        </span>
+      {/key}
+    </div>
+  {:else if mode === 'dictate'}
+    {@const thinking = dictation.state === 'thinking'}
+    <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
+      <span class="mic" class:failed={dictation.failed}><Icon name="mic" size={17} /></span>
+      <Wave level={dictation.level} {thinking} bars={18} />
+      {#key dictation.text}
+        <span class="said" class:waiting={!dictation.text} in:fade={{ duration: 220 }}>
+          {dictation.text || (thinking ? 'Typing' : 'Dictating')}
         </span>
       {/key}
     </div>
@@ -861,6 +887,13 @@
     display: flex;
     align-items: center;
     gap: 12px;
+  }
+  .mic {
+    display: grid;
+    color: var(--accent-focus);
+  }
+  .mic.failed {
+    color: var(--bad);
   }
   .said {
     flex: 1;

@@ -12,6 +12,7 @@
   import Segmented from './Segmented.svelte';
   import Stepper from './Stepper.svelte';
   import Toggle from './Toggle.svelte';
+  import { dictation } from '$lib/dictation.svelte';
 
   let { lyricsOn, onLyrics, onclose }: { lyricsOn: boolean; onLyrics: () => void; onclose: () => void } = $props();
 
@@ -88,6 +89,7 @@
     <section>
       <h3>Choco</h3>
       <div class="row"><span>Hey Choco</span><Toggle label="Hey Choco" on={choco.settings.enabled} onchange={(on) => choco.set({ enabled: on })} /></div>
+      <div class="row"><span>Hold Right Ctrl to dictate</span><Toggle label="Dictation" on={dictation.enabled} onchange={(on) => dictation.setEnabled(on)} /></div>
       <div class="row">
         <span>Hears you</span>
         <Segmented options={SENSITIVITY} value={choco.settings.sensitivity} onchange={(v) => choco.set({ sensitivity: v })} />
