@@ -1,5 +1,6 @@
 // Window placement, hover tracking, click-through, hiding and
-// Caps Lock events for the island window.
+// Caps Lock events for the island window. You can drag the island out of the way;
+// `island-moved` (bool) says whether it's away from the top middle of its screen.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,15 +50,35 @@ pub fn place(window: &WebviewWindow) -> tauri::Result<()> {
     let monitor = window.primary_monitor()?.or(window.current_monitor()?);
     window.set_size(tauri::LogicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT))?;
     if let Some(monitor) = monitor {
-        let scale = monitor.scale_factor();
-        let width = (WINDOW_WIDTH * scale).round() as i32;
-        let x = monitor.position().x + (monitor.size().width as i32 - width) / 2;
-        window.set_position(tauri::PhysicalPosition::new(x, monitor.position().y))?;
+        window.set_position(middle(&monitor))?;
     }
+    let app = window.app_handle().clone();
+    let moved = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Moved(pos) = event {
+            let away = moved.current_monitor().ok().flatten().is_some_and(|m| middle(&m) != *pos);
+            let _ = app.emit("island-moved", away);
+        }
+    });
     window.set_ignore_cursor_events(true)
 }
 
+/// Where the window sits for the island to be at the top middle of `monitor`.
+fn middle(monitor: &tauri::Monitor) -> tauri::PhysicalPosition<i32> {
+    let width = (WINDOW_WIDTH * monitor.scale_factor()).round() as i32;
+    let x = monitor.position().x + (monitor.size().width as i32 - width) / 2;
+    tauri::PhysicalPosition::new(x, monitor.position().y)
+}
+
+/// Back to the top middle of the screen it's on, after being dragged aside.
+#[tauri::command]
+pub fn island_recentre(window: WebviewWindow) -> Result<(), String> {
+    let monitor = window.current_monitor().map_err(|e| e.to_string())?.ok_or("no monitor")?;
+    window.set_position(middle(&monitor)).map_err(|e| e.to_string())
+}
+
 pub fn spawn_watcher(app: AppHandle, window: WebviewWindow) {
+    let _ = HWND.set(window.hwnd().map_or(0, |h| h.0 as isize));
     std::thread::spawn(move || {
         let mut hovered = false;
         let mut visible = true;
@@ -83,7 +104,7 @@ pub fn spawn_watcher(app: AppHandle, window: WebviewWindow) {
                 continue;
             }
 
-            let inside = cursor_inside(&app, &window);
+            let inside = cursor_inside(&app);
             if inside != hovered {
                 hovered = inside;
                 app.state::<Hovered>().0.store(inside, Ordering::Relaxed);
@@ -100,19 +121,34 @@ pub fn spawn_watcher(app: AppHandle, window: WebviewWindow) {
     });
 }
 
-fn cursor_inside(app: &AppHandle, window: &WebviewWindow) -> bool {
-    let (Ok(pos), Ok(size), Ok(scale)) =
-        (window.outer_position(), window.outer_size(), window.scale_factor())
-    else {
-        return false;
-    };
+static HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
+/// The island window's physical (left, top, width) and scale, straight from Windows: Tauri's
+/// getters wait on the UI thread, and these are read many times a second. None while hidden.
+#[cfg(target_os = "windows")]
+pub(crate) fn frame() -> Option<(i32, i32, i32, f64)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindowVisible};
+
+    let hwnd = *HWND.get()? as windows_sys::Win32::Foundation::HWND;
+    let mut r: RECT = unsafe { std::mem::zeroed() };
+    if unsafe { IsWindowVisible(hwnd) == 0 || GetWindowRect(hwnd, &mut r) == 0 } {
+        return None;
+    }
+    let scale = unsafe { GetDpiForWindow(hwnd) } as f64 / 96.0;
+    Some((r.left, r.top, r.right - r.left, scale))
+}
+
+fn cursor_inside(app: &AppHandle) -> bool {
+    let Some((left, top, width, scale)) = frame() else { return false };
     let (w, h) = *app.state::<HitSize>().0.lock().unwrap();
     let (cx, cy) = cursor_pos();
     let half = w * scale / 2.0;
-    let centre = pos.x as f64 + size.width as f64 / 2.0;
+    let centre = left as f64 + width as f64 / 2.0;
     let x = cx as f64;
     let y = cy as f64;
-    x >= centre - half && x <= centre + half && y >= pos.y as f64 && y <= pos.y as f64 + h * scale
+    x >= centre - half && x <= centre + half && y >= top as f64 && y <= top as f64 + h * scale
 }
 
 #[cfg(target_os = "windows")]
@@ -142,11 +178,24 @@ pub(crate) fn fullscreen_app_active() -> bool {
         SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
         QUNS_RUNNING_D3D_FULL_SCREEN,
     };
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetClassNameW, GetForegroundWindow, GetWindowRect,
+        GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
     };
 
     unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() {
+            return false;
+        }
+        // Our own windows: circle to ask covers the whole screen (and Windows calls that
+        // full-screen too), but it's no game.
+        let mut pid = 0;
+        GetWindowThreadProcessId(fg, &mut pid);
+        if pid == GetCurrentProcessId() {
+            return false;
+        }
+
         let mut state = 0;
         if SHQueryUserNotificationState(&mut state) == 0
             && matches!(
@@ -157,10 +206,6 @@ pub(crate) fn fullscreen_app_active() -> bool {
             return true;
         }
 
-        let fg = GetForegroundWindow();
-        if fg.is_null() {
-            return false;
-        }
         let mut class = [0u16; 64];
         let len = GetClassNameW(fg, class.as_mut_ptr(), class.len() as i32) as usize;
         let class = String::from_utf16_lossy(&class[..len]);

@@ -1,7 +1,8 @@
 <script lang="ts">
   // Circle to ask: a dimmed screen to draw on. The circled part stays bright; ask about it
-  // by voice (it starts listening as soon as you let go) or by typing, and the answer
-  // appears beside it. Esc closes; drawing again starts over.
+  // by voice (it starts listening as soon as you let go) or by typing. Asking clears the
+  // screen and Choco answers on the island (circle.rs). Drawing again starts over; Esc or
+  // the shortcut again leaves.
   import '$lib/theme.css';
   import { tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -18,12 +19,10 @@
   let points = $state<[number, number][]>([]);
   let drawing = $state(false);
   let box = $state<Box | null>(null);
-  let stage = $state<'draw' | 'ask' | 'thinking' | 'answer'>('draw');
+  let stage = $state<'draw' | 'ask'>('draw');
   let question = $state('');
   let listening = $state(false);
   let level = $state(0);
-  let answer = $state('');
-  let failed = $state(false);
   let field: HTMLInputElement | undefined = $state();
   let run = 0;
 
@@ -32,8 +31,8 @@
     if (!box) return { left: 0, top: 0 };
     const left = Math.min(Math.max(GAP, box.x + box.w / 2 - CARD_W / 2), innerWidth - CARD_W - GAP);
     const below = box.y + box.h + GAP;
-    // Below the circle if there's room, else above it, else inside the bottom of it.
-    const top = below + 180 < innerHeight ? below : Math.max(GAP, box.y - GAP - 180);
+    // Below the circle if there's room, else above it.
+    const top = below + 60 < innerHeight ? below : Math.max(GAP, box.y - GAP - 60);
     return { left, top };
   });
 
@@ -54,8 +53,6 @@
     stage = 'draw';
     question = '';
     listening = false;
-    answer = '';
-    failed = false;
   }
 
   function close() {
@@ -116,33 +113,21 @@
     }
   }
 
-  async function ask() {
-    if (!box || stage === 'thinking') return;
-    const mine = run;
-    stage = 'thinking';
-    invoke('circle_stop_listening');
+  function ask() {
+    if (!box) return;
     // The circled box, padded a little, in physical pixels.
     const pad = 6;
     const dpr = devicePixelRatio;
     const x = Math.max(0, box.x - pad);
     const y = Math.max(0, box.y - pad);
-    try {
-      const text = await invoke<string>('circle_ask', {
-        x: Math.round(x * dpr),
-        y: Math.round(y * dpr),
-        w: Math.round((box.w + pad * 2) * dpr),
-        h: Math.round((box.h + pad * 2) * dpr),
-        question,
-      });
-      if (mine !== run) return;
-      answer = text || 'No answer came back.';
-      failed = false;
-    } catch (e) {
-      if (mine !== run) return;
-      answer = String(e);
-      failed = true;
-    }
-    stage = 'answer';
+    invoke('circle_ask', {
+      x: Math.round(x * dpr),
+      y: Math.round(y * dpr),
+      w: Math.round((box.w + pad * 2) * dpr),
+      h: Math.round((box.h + pad * 2) * dpr),
+      question,
+    });
+    reset();
   }
 </script>
 
@@ -162,21 +147,12 @@
   </svg>
 
   {#if stage === 'draw' && !drawing}
-    <div class="hint">Draw around anything to ask about it <kbd>Esc</kbd></div>
+    <div class="hint">Draw around anything to ask Choco about it <kbd>Esc</kbd></div>
   {/if}
 
   {#if box && stage !== 'draw'}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="card" style="left: {card.left}px; top: {card.top}px; width: {CARD_W}px" onpointerdown={(e) => e.stopPropagation()}>
-      {#if stage === 'answer'}
-        <p class="question">{question || 'What is this?'}</p>
-        <div class="answer" class:failed>
-          {#each answer.split('\n').filter((l) => l.trim()) as line}
-            {#if line.trimStart().startsWith('- ')}<p class="bullet">{line.trimStart().slice(2)}</p>{:else}<p>{line}</p>{/if}
-          {/each}
-        </div>
-        <button class="again" onclick={() => ((stage = 'ask'), (question = ''), tick().then(() => field?.focus()))}>Ask something else</button>
-      {:else}
         <form onsubmit={(e) => (e.preventDefault(), ask())}>
           {#if listening}
             <Wave {level} bars={10} />
@@ -188,12 +164,9 @@
             bind:value={question}
             oninput={typing}
             placeholder={listening ? 'Listening… or type' : 'Ask about this'}
-            disabled={stage === 'thinking'}
             spellcheck="false"
           />
-          {#if stage === 'thinking'}<Wave level={0} thinking bars={10} />{/if}
         </form>
-      {/if}
     </div>
   {/if}
 </div>
@@ -292,44 +265,5 @@
   }
   input::placeholder {
     color: var(--text-faint);
-  }
-  .question {
-    margin: 0 0 6px;
-    font-size: 12px;
-    color: var(--text-dim);
-  }
-  .answer p {
-    margin: 0 0 6px;
-    font-size: 13.5px;
-    line-height: 1.45;
-  }
-  .answer .bullet {
-    padding-left: 14px;
-    position: relative;
-  }
-  .answer .bullet::before {
-    content: '';
-    position: absolute;
-    left: 3px;
-    top: 0.6em;
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: var(--text-dim);
-  }
-  .answer.failed p {
-    color: var(--bad);
-  }
-  .again {
-    margin-top: 4px;
-    padding: 0;
-    border: none;
-    background: none;
-    color: var(--text-dim);
-    font: 600 12px var(--font);
-    cursor: pointer;
-  }
-  .again:hover {
-    color: var(--text);
   }
 </style>

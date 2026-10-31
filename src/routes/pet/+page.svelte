@@ -4,6 +4,9 @@
   //
   // Resting goes stand → sit → the odd trick → (a yawn) → lie down, like a dog settling in.
   // Tricks are weighted by energy and never repeat back to back.
+  //
+  // Click it and it stays: sits right there watching the cursor, and if it's left long enough,
+  // curls up and dozes off. Click again and it's up with a woof and following.
   import '$lib/theme.css';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
@@ -18,6 +21,8 @@
   const SIT_AFTER = 1200;
   const LIE_AFTER: Record<Energy, number> = { calm: 35_000, playful: 70_000 };
   const PET_AFTER = 1000;
+  /** Staying this long and it falls asleep where it sits. */
+  const STAY_SLEEP = 30_000;
   const BOB_EVERY = 5000;
   /** Seconds between tricks: [min, max]. */
   const TRICK_GAP: Record<Energy, [number, number]> = { calm: [12, 20], playful: [6, 11] };
@@ -43,6 +48,9 @@
   let motion = $state<Motion>('rest');
   let facing = $state(1);
   let slope = $state(0);
+  let gaze = $state(0);
+  let staying = $state(false);
+  let asleep = $state(false);
   let pose = $state<Pose>('stand');
   let trick = $state<Act>('none');
   let petted = $state(false);
@@ -50,10 +58,13 @@
   let config = $state<Config>({ enabled: true, energy: 'calm', sounds: false });
   let mood = $state<Mood>({ music: false, listening: false, calm: false });
 
-  /** What the dog shows: moving beats everything, then petting and listening, then a trick. */
+  /** What the dog shows: moving beats everything, then sleep, petting, staying and listening,
+   *  then a trick. */
   const act = $derived.by((): Act => {
     if (motion !== 'rest') return motion;
+    if (asleep) return 'sleep';
     if (petted) return 'happy';
+    if (staying) return trick === 'none' ? 'watch' : trick;
     if (mood.listening) return 'listen';
     return trick;
   });
@@ -61,12 +72,15 @@
   $effect(() => {
     invoke<Config>('pet_config').then((c) => (config = c));
     const offs = [
-      listen<{ motion: Motion; facing: number; slope: number }>('pet-motion', (e) => {
+      listen<{ motion: Motion; facing: number; slope: number; gaze: number }>('pet-motion', (e) => {
         // Pulling up from a run: a little skid.
         if (e.payload.motion === 'rest' && motion === 'run') play('skid');
+        // Off again (a reminder, sent home, a new trip out): no longer staying.
+        if (e.payload.motion !== 'rest') staying = asleep = false;
         motion = e.payload.motion;
         facing = e.payload.facing;
         slope = e.payload.slope;
+        gaze = e.payload.gaze;
       }),
       listen<Config>('pet-config', (e) => (config = e.payload)),
       listen<Mood>('pet-mood', (e) => (mood = e.payload)),
@@ -86,6 +100,16 @@
     const energy = config.energy;
     const timers: ReturnType<typeof setTimeout>[] = [];
     const later = (ms: number, f: () => void) => timers.push(setTimeout(f, ms));
+    if (staying) {
+      // Sits at once and watches; no tricks, just a yawn before it nods off.
+      pose = 'sit';
+      later(STAY_SLEEP - 1700, () => play('yawn'));
+      later(STAY_SLEEP, () => {
+        pose = 'lie';
+        asleep = true;
+      });
+      return () => timers.forEach(clearTimeout);
+    }
     if (mood.calm) {
       later(400, () => (pose = 'lie'));
       return () => timers.forEach(clearTimeout);
@@ -107,7 +131,7 @@
 
   // Music: a little head bob now and then while it rests.
   $effect(() => {
-    if (!mood.music || motion !== 'rest' || mood.calm) return;
+    if (!mood.music || motion !== 'rest' || mood.calm || staying) return;
     const id = setInterval(() => trick === 'none' && play('bob'), BOB_EVERY);
     return () => clearInterval(id);
   });
@@ -140,12 +164,20 @@
     else petted = false;
   }
 
-  let clicks = 0;
   let clickTimer: ReturnType<typeof setTimeout> | undefined;
   function click() {
-    // Wait a moment so a double-click (go home) doesn't bark first. Hop and bark take turns.
+    // Wait a moment so a double-click (go home) doesn't count as a click too.
     clearTimeout(clickTimer);
-    clickTimer = setTimeout(() => (clicks++ % 2 ? play('hop') : woof()), 250);
+    clickTimer = setTimeout(() => stay(!staying), 250);
+  }
+  /** Sit and stay, or (already staying, even asleep) up with a woof and follow again. */
+  function stay(on: boolean) {
+    staying = on;
+    invoke('pet_stay', { stay: on });
+    if (on) return;
+    asleep = false;
+    pose = 'stand';
+    woof();
   }
   function home() {
     clearTimeout(clickTimer);
@@ -185,8 +217,12 @@
   {/key}
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="dog" style="transform: scaleX({facing})" onclick={click} ondblclick={home}>
-    <Dog {pose} {act} {slope} />
+    <Dog {pose} {act} {slope} {gaze} />
   </div>
+  {#if act === 'sleep'}
+    <!-- Outside the flipped dog so the z's read the right way round. -->
+    <span class="zzz" style="--side: {facing}"><i>z</i><i>z</i><i>z</i></span>
+  {/if}
 </main>
 
 <style>
@@ -204,6 +240,44 @@
     width: 70px;
     height: 54px;
     transition: transform 160ms var(--ease-out);
+  }
+  /* Asleep: little z's drifting up off its head, one after another, growing as they go. */
+  .zzz {
+    position: absolute;
+    left: calc(50% + var(--side) * 20px);
+    bottom: 34px;
+    pointer-events: none;
+  }
+  .zzz i {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    color: #f7f7f9;
+    font-size: 10px;
+    font-style: normal;
+    font-weight: 700;
+    -webkit-text-stroke: 0.8px #2a2a30;
+    opacity: 0;
+    animation: zzz 2.7s ease-out infinite;
+  }
+  .zzz i:nth-child(2) {
+    animation-delay: 0.9s;
+  }
+  .zzz i:nth-child(3) {
+    animation-delay: 1.8s;
+  }
+  @keyframes zzz {
+    0% {
+      opacity: 0;
+      transform: translate(0, 0) scale(0.6);
+    }
+    20% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+      transform: translate(calc(var(--side) * 10px), -26px) scale(1.3);
+    }
   }
   /* A small speech bubble over its head; never flipped, so it reads. */
   .woof {

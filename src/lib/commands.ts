@@ -120,6 +120,34 @@ function offline(s: string): Action | Reply | null {
   return null;
 }
 
+const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** "open spotify": an app from the Start menu by name, opened straight away. Null when no
+    app goes by that name, so the model can take it (a website, a file, a setting). */
+async function openApp(s: string): Promise<Reply | null> {
+  const m = s.match(/^(?:open|launch|start|run)(?: up)? (?:the |my )?(.+?)(?: app)?$/);
+  if (!m) return null;
+  const want = m[1];
+  let apps: { name: string; id: string }[];
+  try {
+    apps = await invoke('apps_list');
+  } catch {
+    return null;
+  }
+  const named = apps.map((a) => ({ ...a, words: words(a.name) }));
+  const app =
+    named.find((a) => a.words === want) ??
+    named.find((a) => a.words.startsWith(want + ' ')) ??
+    named.find((a) => a.words.split(' ').includes(want) && want.length > 3);
+  if (!app) return null;
+  try {
+    await invoke('apps_launch', { id: app.id });
+    return { text: `Opening ${app.name}.` };
+  } catch (e) {
+    return { text: String(e), tone: 'bad' };
+  }
+}
+
 /** One line about what's going on, so the model can answer "how long is left?" and the like. */
 function context() {
   const now = new Date();
@@ -155,6 +183,8 @@ export async function handle(heard: string, history: Turn[], session: string): P
 
   const local = offline(s);
   if (local) return 'name' in local ? act(local) : local;
+  const opened = await openApp(s);
+  if (opened) return opened;
 
   try {
     const answer = await invoke<{ reply: string; actions: Action[] }>('choco_ask', {
