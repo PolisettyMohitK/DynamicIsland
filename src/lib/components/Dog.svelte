@@ -20,9 +20,7 @@
     | 'bob'
     | 'hop'
     | 'nudge'
-    | 'bark'
-    | 'watch'
-    | 'sleep';
+    | 'bark';
 </script>
 
 <script lang="ts">
@@ -30,14 +28,8 @@
   // (floppy ear, dot eye, small nose). Light fur with a dark outline so it reads on any
   // wallpaper. Faces right; the page flips it.
   // slope: how far it leans while moving, in degrees; negative climbs up the screen, positive
-  // heads down it. Steep enough and the stride changes too. gaze: while watching, how far it
-  // tips its head toward the cursor (negative looks up).
-  let {
-    pose,
-    act,
-    slope = 0,
-    gaze = 0,
-  }: { pose: Pose; act: Act; slope?: number; gaze?: number } = $props();
+  // heads down it. Steep enough and the stride changes too.
+  let { pose, act, slope = 0 }: { pose: Pose; act: Act; slope?: number } = $props();
 
   // Head, drawn once and moved per pose: round skull, a short muzzle with a little stop.
   const HEAD = 'M50 7C44 7 40 11.5 40 17s4 10 10 10c3.5 0 6-.8 9-1.4 3.7-.8 6-2.6 6-4.8 0-2.6-2.2-4-5-4.2C59.3 11.6 55.6 7 50 7Z';
@@ -45,7 +37,7 @@
   const NECK = '46px 25px';
   const HEAD_AT: Record<Pose, string> = { stand: '', sit: 'translate(-6 -5)', lie: 'translate(2 15)' };
 
-  const closedEyes = $derived(act === 'happy' || act === 'yawn' || act === 'scratch' || act === 'sleep');
+  const closedEyes = $derived(act === 'happy' || act === 'yawn' || act === 'scratch');
   const openMouth = $derived(act === 'yawn' || act === 'bark' || act === 'run' || act === 'happy');
 </script>
 
@@ -67,7 +59,7 @@
   class="dog {pose} {act}"
   class:up={slope <= -12}
   class:down={slope >= 12}
-  style="--slope: {slope}deg; --gaze: {gaze}deg"
+  style="--slope: {slope}deg"
   viewBox="0 0 70 54"
   aria-hidden="true"
 >
@@ -597,48 +589,6 @@
   .listen .ear,
   .look .ear {
     transform: rotate(-30deg);
-  }
-
-  /* Watch: sitting tight, head following the cursor, ear up, the odd blink. */
-  .watch .head {
-    transform: rotate(var(--gaze));
-    transition: transform 220ms ease-out;
-  }
-  .watch .ear {
-    transform: rotate(-22deg);
-  }
-  .watch .eye {
-    transform-origin: 54px 15.2px;
-    animation: blink 4.2s infinite;
-  }
-  @keyframes blink {
-    0%,
-    94%,
-    100% {
-      transform: none;
-    }
-    97% {
-      transform: scaleY(0.1);
-    }
-  }
-
-  /* Sleep: curled up, head down on its paws, slow breathing, ear gone soft. */
-  .sleep .head {
-    transform: rotate(8deg) translateY(1px);
-  }
-  .sleep .ear {
-    transform: rotate(6deg);
-  }
-  .sleep .whole {
-    animation: breathe 3.2s ease-in-out infinite;
-  }
-  @keyframes breathe {
-    50% {
-      transform: scale(1.015, 1.04);
-    }
-  }
-  .sleep .tail {
-    transform: rotate(14deg);
   }
 
   .bob .head {

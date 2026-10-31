@@ -60,8 +60,6 @@
     <ChocoFace mood={reply.tone === 'bad' ? 'sad' : followUp ? 'alert' : 'happy'} size={17} {level} />
     {#if followUp}
       <span class="listening"><Wave {level} bars={10} /></span>
-      <!-- While following up, `heard` is what's been said so far. -->
-      {#if heard}<span class="heard">{heard}</span>{/if}
     {:else if heard}
       <span class="heard">{heard}</span>
     {/if}

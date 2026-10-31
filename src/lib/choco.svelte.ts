@@ -12,9 +12,6 @@ type BackendEvent =
   | { state: 'heard'; text: string }
   | { state: 'error'; message: string };
 
-/** Circle to ask (circle.rs): a question about part of the screen, then its answer. */
-type Circled = { question: string; reply?: Reply };
-
 type ComputerEvent = { kind: 'step'; text: string } | { kind: 'confirm'; question: string };
 
 export type ChocoState = 'off' | 'loading' | 'ready' | 'listening' | 'thinking' | 'working' | 'answer';
@@ -46,8 +43,6 @@ class Choco {
   /** Mic loudness 0–1 while listening. */
   level = $state(0);
   heard = $state('');
-  /** What's been heard so far, while you're still talking. */
-  partial = $state('');
   reply = $state<Reply | null>(null);
   /** The answer is up and Choco is listening for a follow-up. */
   followUp = $state(false);
@@ -78,11 +73,6 @@ class Choco {
     const stop = [
       listen<BackendEvent>('choco', (e) => this.#on(e.payload)),
       listen<number>('choco-level', (e) => (this.level = e.payload)),
-      listen<string>('choco-partial', (e) => {
-        if (this.state === 'listening' || this.followUp) this.partial = e.payload;
-      }),
-      listen<Circled>('circle-asked', (e) => this.#circled(e.payload.question)),
-      listen<Circled>('circle-answer', (e) => this.#circleAnswer(e.payload)),
       listen('choco-toggle', () => this.set({ enabled: !this.settings.enabled }, true)),
       listen<ComputerEvent>('computer', (e) => {
         if (e.payload.kind === 'step') {
@@ -158,7 +148,6 @@ class Choco {
           this.#stopped = true;
         }
         this.heard = '';
-        this.partial = '';
         this.reply = null;
         this.level = 0;
         this.followUp = false;
@@ -170,21 +159,23 @@ class Choco {
         this.state = 'thinking';
         break;
       case 'idle':
-        this.partial = '';
         // A follow-up nobody used: the answer just stays until it's been read.
         if (this.followUp) this.followUp = false;
         else if (this.state === 'listening') this.state = 'ready';
         break;
       case 'heard': {
         this.heard = e.text;
-        this.partial = '';
         const stopping = this.#stopped;
         this.#stopped = false;
         if (stopping && /^\W*((hey|ok|okay)\W+)?(choco\W+)?(stop|cancel|never ?mind)\b/i.test(e.text)) {
           this.#answer({ text: 'Stopped.' });
           return;
         }
-        this.#asking();
+        if (Date.now() - this.#lastAsked > CONVERSATION_MS) {
+          this.#history = [];
+          this.#session = `choco-${Date.now()}`;
+        }
+        this.#lastAsked = Date.now();
         const reply = await handle(e.text, this.#history, this.#session);
         // A new "Hey Choco" while the model was answering wins.
         if (this.state !== 'thinking' || this.heard !== e.text) return;
@@ -196,13 +187,14 @@ class Choco {
           this.#work(reply.computer, e.text);
           return;
         }
-        this.#remember(e.text, reply);
+        if (reply.text && reply.tone !== 'bad') {
+          this.#history = [...this.#history, { role: 'user' as const, content: e.text }, { role: 'assistant' as const, content: reply.text }].slice(-HISTORY_TURNS);
+        }
         this.#answer(reply);
         break;
       }
       case 'error':
         this.heard = '';
-        this.partial = '';
         this.#answer({ text: e.message, tone: 'bad' });
         break;
       default:
@@ -231,42 +223,10 @@ class Choco {
     }
     this.question = null;
     if (run !== this.#run || this.state !== 'working') return;
-    this.#remember(asked, reply);
-    this.#answer(reply);
-  }
-
-  /** Circle to ask sent a question; Choco thinks on the island until its answer comes. */
-  #circled(question: string) {
-    if (this.state === 'working') return;
-    clearTimeout(this.#timer);
-    this.#asking();
-    this.heard = question;
-    this.partial = '';
-    this.reply = null;
-    this.followUp = false;
-    this.state = 'thinking';
-  }
-
-  #circleAnswer({ question, reply }: Circled) {
-    // Something newer took the island meanwhile.
-    if (!reply || this.state !== 'thinking' || this.heard !== question) return;
-    this.#remember(`${question} (about something I circled on screen)`, reply);
-    this.#answer(reply);
-  }
-
-  /** A new question; after a long pause it starts a new conversation. */
-  #asking() {
-    if (Date.now() - this.#lastAsked > CONVERSATION_MS) {
-      this.#history = [];
-      this.#session = `choco-${Date.now()}`;
+    if (reply.tone !== 'bad') {
+      this.#history = [...this.#history, { role: 'user' as const, content: asked }, { role: 'assistant' as const, content: reply.text }].slice(-HISTORY_TURNS);
     }
-    this.#lastAsked = Date.now();
-  }
-
-  /** Keeps a question and its answer for follow-ups. */
-  #remember(asked: string, reply: Reply) {
-    if (!reply.text || reply.tone === 'bad') return;
-    this.#history = [...this.#history, { role: 'user' as const, content: asked }, { role: 'assistant' as const, content: reply.text }].slice(-HISTORY_TURNS);
+    this.#answer(reply);
   }
 
   #answer(reply: Reply) {

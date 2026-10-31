@@ -4,7 +4,6 @@
   import { fade, fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { untrack } from 'svelte';
   import { onPopup, type Popup } from '$lib/alerts';
   import { clock } from '$lib/clock.svelte';
@@ -57,10 +56,6 @@
     dictate: { w: 320, h: 44, r: 22 },
     work: { w: 440, h: 44, r: 22 },
   };
-  /** Voice widens once there are words to show. */
-  const VOICE_SAID_W = 440;
-  /** The preview shows the latest words; about this many characters fit. */
-  const SAID_CHARS = 44;
   /** The resting pill while the pet is out on the desktop: its empty bed. */
   const AWAY: Shape = { w: 64, h: 22, r: 11 };
   /** The resting pill while Choco sleeps in it: the time on its left, the day on its right. */
@@ -119,12 +114,6 @@
     return nowPlaying.media?.playing ? 'vibe' : 'idle';
   });
   const fit = (h: number) => Math.ceil(h / HEIGHT_STEP) * HEIGHT_STEP;
-  /** What Choco heard, or has heard so far while you're talking: its last words if it's long. */
-  const said = $derived.by(() => {
-    const text = choco.heard || choco.partial;
-    if (text.length <= SAID_CHARS) return text;
-    return '…' + text.slice(-SAID_CHARS).replace(/^\S*\s/, '');
-  });
   const shape = $derived<Shape>(
     mode === 'expanded' && wide
       ? SHAPES.wide
@@ -138,9 +127,7 @@
             ? AWAY
             : mode === 'idle' && idleMood === 'sleep'
               ? SLEEPING
-              : mode === 'voice' && said
-                ? { ...SHAPES.voice, w: VOICE_SAID_W }
-                : SHAPES[mode],
+              : SHAPES[mode],
   );
   const voice = $derived(mode === 'voice' || mode === 'work' || mode === 'answer');
   const grow = $derived(
@@ -225,27 +212,6 @@
       play(['peek', LEAVE_HOLD], ['rest', LEAVE_HOLD + 120]);
     else if (mode === 'popup') play(['peek', 0], ['rest', 120]);
     else play(['rest', 0]);
-  }
-
-  /** Dragged away from the top middle of the screen (island.rs). */
-  let moved = $state(false);
-  /** Where a press started, until it becomes a drag or a click. */
-  let press: { x: number; y: number } | null = null;
-  /** This far with the button down is a drag, not a click. */
-  const DRAG_PX = 6;
-
-  // Drag the island anywhere out of the way. Not from fields, sliders or shelf files,
-  // which have drags of their own.
-  function pressDown(e: PointerEvent) {
-    const own = (e.target as Element).closest('input, textarea, select, .tile');
-    press = e.button === 0 && !own ? { x: e.screenX, y: e.screenY } : null;
-  }
-
-  function pressMove(e: PointerEvent) {
-    if (!press || !(e.buttons & 1)) return;
-    if (Math.hypot(e.screenX - press.x, e.screenY - press.y) < DRAG_PX) return;
-    press = null;
-    getCurrentWindow().startDragging();
   }
 
   function showPopup(next: Popup) {
@@ -416,7 +382,6 @@
   $effect(() => {
     const unlisten = [
       listen<boolean>('island-hover', (e) => (e.payload ? onEnter() : onLeave())),
-      listen<boolean>('island-moved', (e) => (moved = e.payload)),
       listen<boolean>('island-caps', (e) =>
         showPopup({ icon: 'caps', label: 'Caps Lock', value: e.payload ? 'On' : 'Off', tone: e.payload ? 'ok' : undefined }),
       ),
@@ -427,24 +392,20 @@
   });
 </script>
 
-<!-- Dragging it moves it; the parts inside are the controls. -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   class="island"
   class:grow
   class:idle={mode === 'idle'}
   style="--w: {shape.w}px; --h: {shape.h}px; --r: {shape.r}px"
   onwheel={onWheel}
-  onpointerdown={pressDown}
-  onpointermove={pressMove}
-  onpointerup={() => (press = null)}
 >
-  <!-- Each glass refresh copies the screen back from the GPU, so only what you're interacting with
-       gets 30fps; the resting pill refreshes once a second and the live bar 4 times. -->
+  <!-- The resting live bar refreshes its glass at 10fps; anything you're interacting with gets 30fps. -->
+  <!-- The resting pill barely changes, so its glass refreshes once a second; the live bar at 10fps;
+       anything you're interacting with at 30fps. -->
   <Glass
     {shape}
     active
-    frameMs={mode === 'idle' ? 1000 : mode === 'live' || mode === 'work' ? 250 : 33}
+    frameMs={mode === 'idle' ? 1000 : mode === 'live' || mode === 'work' ? 100 : 33}
     prewarm={[AWAY, SLEEPING, SHAPES.peek, SHAPES.expanded, SHAPES.wide, SHAPES.live, SHAPES.popup, SHAPES.voice, SHAPES.work]}
   />
   <div class="glow" class:on={glow} style="--album: {glowColour ?? '255 255 255'}"></div>
@@ -505,9 +466,6 @@
               {/key}
             {/if}
             <span class="clock">{date}<b>{time}</b><BatteryRing /></span>
-            {#if moved}
-              <button class="recentre" onclick={() => invoke('island_recentre')}>Return to middle</button>
-            {/if}
             <IconButton icon="settings" size={24} quiet label="Settings" onclick={() => play(['settings', 0])} />
           </header>
 
@@ -551,10 +509,10 @@
     {@const thinking = choco.state === 'thinking'}
     <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
       <ChocoFace mood={thinking ? 'think' : 'alert'} size={17} level={thinking ? 0 : choco.level} />
-      <Wave level={choco.level} {thinking} bars={said ? 10 : 18} />
+      <Wave level={choco.level} {thinking} bars={18} />
       {#key choco.heard}
-        <span class="said" class:waiting={!said} in:fade={{ duration: 220 }}>
-          {said || (thinking ? '' : 'Listening')}
+        <span class="said" class:waiting={!choco.heard} in:fade={{ duration: 220 }}>
+          {choco.heard || (thinking ? '' : 'Listening')}
         </span>
       {/key}
     </div>
@@ -588,7 +546,7 @@
       {#key choco.reply}
         <Answer
           reply={choco.reply}
-          heard={choco.followUp ? said : choco.heard}
+          heard={choco.heard}
           followUp={choco.followUp}
           level={choco.level}
           width={answerW}
@@ -975,22 +933,6 @@
     color: var(--text-faint);
     font: 500 12px var(--font);
     cursor: pointer;
-  }
-  .recentre {
-    flex: none;
-    height: 22px;
-    margin: 0 4px 0 10px;
-    padding: 0 9px;
-    border: none;
-    border-radius: 11px;
-    background: rgba(255, 255, 255, 0.1);
-    color: var(--text-dim);
-    font: 600 11.5px var(--font);
-    cursor: pointer;
-  }
-  .recentre:hover {
-    background: rgba(255, 255, 255, 0.16);
-    color: var(--text);
   }
   .stop:hover {
     color: var(--text);

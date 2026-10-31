@@ -27,19 +27,22 @@ pub fn exclude_from_capture(window: &WebviewWindow) {
 /// hidden, or when nothing changed since the last call unless `force` is set.
 #[tauri::command]
 pub async fn capture_backdrop(
+    window: WebviewWindow,
     last: State<'_, LastFrame>,
     height: f64,
     force: bool,
 ) -> Result<Response, String> {
-    let Some((x, y, _, scale)) = crate::island::frame() else {
+    if !window.is_visible().unwrap_or(false) {
         return Ok(Response::new(Vec::new()));
-    };
+    }
+    let pos = window.outer_position().map_err(|e| e.to_string())?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
     let out_w = WINDOW_WIDTH as i32;
     let out_h = height.round().clamp(1.0, WINDOW_HEIGHT) as i32;
     let src_w = (WINDOW_WIDTH * scale).round() as i32;
     let src_h = (out_h as f64 * scale).round() as i32;
 
-    let frame = grab(x, y, src_w, src_h, out_w, out_h);
+    let frame = grab(pos.x, pos.y, src_w, src_h, out_w, out_h);
     let mut last = last.0.lock().unwrap();
     if !force && *last == frame {
         return Ok(Response::new(Vec::new()));

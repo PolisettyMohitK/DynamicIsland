@@ -7,7 +7,6 @@
 //! - `choco` {state: "loading" | "ready" | "off" | "thinking" | "idle"},
 //!   {state: "listening", followUp}, {state: "heard", text} or {state: "error", message}
 //! - `choco-level` 0–1 microphone level while listening.
-//! - `choco-partial` what's been said so far, while you're still talking.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -19,7 +18,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ort::environment::Environment;
 use ort::session::Session;
-use ort::value::{DynValue, Tensor};
+use ort::value::Tensor;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -39,26 +38,17 @@ const MODELS: [(&str, &str); 5] = [
     ("melspectrogram.onnx", "{OWW}/melspectrogram.onnx"),
     ("embedding_model.onnx", "{OWW}/embedding_model.onnx"),
     ("moonshine_encoder.onnx", "{MOON}/onnx/encoder_model_quantized.onnx"),
-    // The merged decoder remembers its work between words instead of starting over each time.
-    ("moonshine_decoder_merged.onnx", "{MOON}/onnx/decoder_model_merged_quantized.onnx"),
+    ("moonshine_decoder.onnx", "{MOON}/onnx/decoder_model_quantized.onnx"),
     ("moonshine_tokenizer.json", "{MOON}/tokenizer.json"),
 ];
 
 /// Recording ends after this much quiet once you've started talking.
-const END_SILENCE: Duration = Duration::from_millis(800);
+const END_SILENCE: Duration = Duration::from_millis(900);
 /// Give up if nothing is said this long after the wake word.
 const NO_SPEECH: Duration = Duration::from_secs(5);
 /// After an answer Choco listens a little for a follow-up, without the wake word.
 const NO_FOLLOW_UP: Duration = Duration::from_secs(4);
-const MAX_COMMAND: Duration = Duration::from_secs(12);
-/// How often what's been said so far is turned into text for the preview.
-const PREVIEW_EVERY: Duration = Duration::from_millis(600);
-/// Speech is louder than this share of the loudest moment of the command; anything quieter is
-/// the room, so steady noise can't keep a command open.
-const VOICE_OF_PEAK: f32 = 0.2;
-/// After this much quiet the command is probably over, so it's turned into text while the
-/// rest of END_SILENCE runs out; the answer is ready the moment listening stops.
-const SETTLED: Duration = Duration::from_millis(400);
+const MAX_COMMAND: Duration = Duration::from_secs(20);
 
 pub struct Choco {
     enabled: AtomicBool,
@@ -170,21 +160,10 @@ fn run(app: AppHandle, choco: Arc<Choco>) {
 /// Speech-to-text, shared by "Hey Choco" and dictation so Moonshine is only in memory once.
 static STT: Mutex<Option<Stt>> = Mutex::new(None);
 
-/// ONNX Runtime allows one environment per process, ever; the wake word and speech-to-text share it.
-fn env() -> Res<&'static Environment> {
-    static ENV: std::sync::OnceLock<Environment> = std::sync::OnceLock::new();
-    static INIT: Mutex<()> = Mutex::new(());
-    let _one = INIT.lock().unwrap();
-    if let Some(env) = ENV.get() {
-        return Ok(env);
-    }
-    let env = ort::init().with_name("choco").build()?;
-    Ok(ENV.get_or_init(|| env))
-}
-
 fn load(app: &AppHandle) -> Res<Wake> {
     let dir = fetch(app)?;
-    let wake = Wake::new(env()?, &dir, WAKE_MODEL)?;
+    let env = ort::init().with_name("choco").build()?;
+    let wake = Wake::new(&env, &dir, WAKE_MODEL)?;
     load_stt(app)?;
     Ok(wake)
 }
@@ -196,8 +175,6 @@ fn fetch(app: &AppHandle) -> Res<PathBuf> {
     let _one = FETCHING.lock().unwrap();
     let dir = app.path().app_local_data_dir()?.join("models");
     std::fs::create_dir_all(&dir)?;
-    // Replaced by moonshine_decoder_merged.onnx.
-    let _ = std::fs::remove_file(dir.join("moonshine_decoder.onnx"));
     for (name, url) in MODELS {
         let path = dir.join(name);
         if !path.exists() {
@@ -214,7 +191,8 @@ pub(crate) fn load_stt(app: &AppHandle) -> Res<()> {
         return Ok(());
     }
     let dir = fetch(app)?;
-    let stt = Stt::new(env()?, &dir)?;
+    let env = ort::init().with_name("choco").build()?;
+    let stt = Stt::new(&env, &dir)?;
     STT.lock().unwrap().get_or_insert(stt);
     Ok(())
 }
@@ -238,14 +216,13 @@ async fn download(url: &str, to: &Path) -> Res<()> {
     Ok(())
 }
 
-/// The wake word gets one thread, so always listening never competes with what you're doing.
-/// Speech-to-text runs only while you wait for it, so it gets a few.
-fn builder(env: &Environment, threads: usize) -> Res<ort::session::builder::SessionBuilder> {
-    Ok(Session::builder(env)?.with_intra_threads(threads).map_err(ort::Error::<()>::from)?)
+/// One thread per model: Choco should never compete with what you're doing.
+fn builder(env: &Environment) -> Res<ort::session::builder::SessionBuilder> {
+    Ok(Session::builder(env)?.with_intra_threads(1).map_err(ort::Error::<()>::from)?)
 }
 
-fn session(env: &Environment, path: PathBuf, threads: usize) -> Res<Session> {
-    Ok(builder(env, threads)?.commit_from_file(path)?)
+fn session(env: &Environment, path: PathBuf) -> Res<Session> {
+    Ok(builder(env)?.commit_from_file(path)?)
 }
 
 /// Runs until Choco is turned off or its settings change (Ok), or the microphone fails (Err).
@@ -287,11 +264,11 @@ fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake) -> Res<()> {
 
             match command.as_mut() {
                 None => {
-                    // Track the room's background noise so "talking" is relative to it: down
-                    // quickly, up slowly, so a fan or music becomes the new quiet but a word doesn't.
-                    let rate = if level < floor { 0.05 } else { 0.01 };
-                    floor = (floor * (1.0 - rate) + level * rate).max(50.0);
-                    if wake.push(&chunk, level > floor * 1.5)? >f32::from_bits(choco.threshold.load(Ordering::Relaxed)) {
+                    // Track the room's background noise so "talking" is relative to it.
+                    if level < floor * 2.0 {
+                        floor = (floor * 0.95 + level * 0.05).max(50.0);
+                    }
+                    if wake.push(&chunk)? > f32::from_bits(choco.threshold.load(Ordering::Relaxed)) {
                         command = Some(Command::start(app, false));
                     }
                 }
@@ -299,7 +276,6 @@ fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake) -> Res<()> {
                     let _ = app.emit("choco-level", (level / 3000.0).min(1.0));
                     if let Some(done) = c.push(&chunk, level, floor) {
                         command = None;
-                        PREVIEW_FOR.fetch_add(1, Ordering::Relaxed);
                         wake.reset();
                         match done {
                             Some(audio) => {
@@ -314,9 +290,6 @@ fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake) -> Res<()> {
                         pending.clear();
                         break;
                     }
-                    if c.preview_due() && preview(app, c.audio.clone()) {
-                        c.last_preview = Instant::now();
-                    }
                 }
             }
         }
@@ -327,38 +300,11 @@ fn rms(x: &[f32]) -> f32 {
     (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
 }
 
-/// Bumped when a command ends, so a preview still being worked out for it is dropped.
-static PREVIEW_FOR: AtomicU32 = AtomicU32::new(0);
-/// A preview is being worked out; one at a time.
-static PREVIEWING: AtomicBool = AtomicBool::new(false);
-
-/// Turns what's been said so far into text on another thread, so listening never stalls,
-/// and sends it as `choco-partial`. False if one is already being worked out.
-fn preview(app: &AppHandle, audio: Vec<f32>) -> bool {
-    if PREVIEWING.swap(true, Ordering::AcqRel) {
-        return false;
-    }
-    let command = PREVIEW_FOR.load(Ordering::Relaxed);
-    let app = app.clone();
-    std::thread::spawn(move || {
-        if let Ok(text) = transcribe(&audio) {
-            if !text.is_empty() && PREVIEW_FOR.load(Ordering::Relaxed) == command {
-                let _ = app.emit("choco-partial", text);
-            }
-        }
-        PREVIEWING.store(false, Ordering::Release);
-    });
-    true
-}
-
 /// The spoken command after the wake word.
 struct Command {
     audio: Vec<f32>,
     started: Instant,
     last_voice: Option<Instant>,
-    /// The loudest it's been, so quiet after talking counts as quiet even in a noisy room.
-    peak: f32,
-    last_preview: Instant,
     /// How long to wait for the first word.
     patience: Duration,
 }
@@ -367,15 +313,13 @@ impl Command {
     fn start(app: &AppHandle, follow_up: bool) -> Self {
         emit(app, Event::Listening { follow_up });
         let patience = if follow_up { NO_FOLLOW_UP } else { NO_SPEECH };
-        let now = Instant::now();
-        Command { audio: Vec::new(), started: now, last_voice: None, peak: 0.0, last_preview: now, patience }
+        Command { audio: Vec::new(), started: Instant::now(), last_voice: None, patience }
     }
 
     /// Some(Some(audio)) when finished, Some(None) when nothing was said.
     fn push(&mut self, chunk: &[f32], level: f32, floor: f32) -> Option<Option<Vec<f32>>> {
         self.audio.extend_from_slice(chunk);
-        self.peak = self.peak.max(level);
-        if level > (floor * 2.5).max(300.0).max(self.peak * VOICE_OF_PEAK) {
+        if level > (floor * 2.5).max(300.0) {
             self.last_voice = Some(Instant::now());
         }
         match self.last_voice {
@@ -384,17 +328,6 @@ impl Command {
                 Some(Some(std::mem::take(&mut self.audio)))
             }
             _ => None,
-        }
-    }
-
-    /// Time to update the preview: now and then while you're talking, and once when you've
-    /// gone quiet, so the text is worked out (and remembered) before listening stops.
-    fn preview_due(&self) -> bool {
-        let Some(voice) = self.last_voice else { return false };
-        if voice.elapsed() < SETTLED {
-            self.last_preview.elapsed() >= PREVIEW_EVERY
-        } else {
-            self.last_preview < voice + SETTLED
         }
     }
 }
@@ -481,15 +414,7 @@ impl Downsample {
     }
 }
 
-/// Quiet chunks are held rather than worked through, unless there was sound this recently:
-/// the wake word's score peaks a little after it's said.
-const WAKE_HANGOVER: usize = 16;
-/// Enough held audio to rebuild everything the detector looks at once sound comes back:
-/// 16 embeddings, the first of which looks back 76 mel frames (8 per chunk).
-const WAKE_BACKLOG: usize = 16 + 76 / 8 + 1;
-
 /// openWakeWord: audio → mel frames → speech embeddings → "hey choco" score.
-/// In a quiet room it does nothing until there's sound, then catches up on what it held.
 struct Wake {
     mel: Session,
     embed: Session,
@@ -500,25 +425,20 @@ struct Wake {
     raw: VecDeque<f32>,
     frames: VecDeque<[f32; 32]>,
     embeddings: VecDeque<Vec<f32>>,
-    held: VecDeque<Vec<f32>>,
-    /// Chunks since the last one with sound in it.
-    quiet: usize,
 }
 
 impl Wake {
     fn new(env: &Environment, dir: &Path, model: &[u8]) -> Res<Self> {
-        let word = builder(env, 1)?.commit_from_memory(model)?;
+        let word = builder(env)?.commit_from_memory(model)?;
         Ok(Wake {
-            mel: session(env, dir.join("melspectrogram.onnx"), 1)?,
-            embed: session(env, dir.join("embedding_model.onnx"), 1)?,
+            mel: session(env, dir.join("melspectrogram.onnx"))?,
+            embed: session(env, dir.join("embedding_model.onnx"))?,
             word_in: word.inputs()[0].name().to_string(),
             word_out: word.outputs()[0].name().to_string(),
             word,
             raw: VecDeque::new(),
             frames: VecDeque::new(),
             embeddings: VecDeque::new(),
-            held: VecDeque::new(),
-            quiet: 0,
         })
     }
 
@@ -526,27 +446,9 @@ impl Wake {
         self.raw.clear();
         self.frames = std::iter::repeat([1.0; 32]).take(76).collect();
         self.embeddings.clear();
-        self.held.clear();
-        self.quiet = 0;
     }
 
-    /// The wake score after this chunk; `sound` says whether it's louder than the room.
-    fn push(&mut self, chunk: &[f32], sound: bool) -> Res<f32> {
-        self.quiet = if sound { 0 } else { self.quiet + 1 };
-        if self.quiet > WAKE_HANGOVER {
-            self.held.push_back(chunk.to_vec());
-            if self.held.len() > WAKE_BACKLOG {
-                self.held.pop_front();
-            }
-            return Ok(0.0);
-        }
-        while let Some(c) = self.held.pop_front() {
-            self.score(&c)?;
-        }
-        self.score(chunk)
-    }
-
-    fn score(&mut self, chunk: &[f32]) -> Res<f32> {
+    fn push(&mut self, chunk: &[f32]) -> Res<f32> {
         self.raw.extend(chunk);
         while self.raw.len() > CHUNK + 480 {
             self.raw.pop_front();
@@ -587,53 +489,10 @@ impl Wake {
 struct Stt {
     encoder: Session,
     decoder: Session,
-    /// The decoder's remembered keys and values, one input per layer and kind.
-    past: Vec<String>,
     vocab: Vec<String>,
-    /// The last audio it worked out and what it said, so the same speech isn't done twice
-    /// (a command's final text is usually ready from the preview taken as you went quiet).
-    last: Option<(Vec<f32>, String)>,
-}
-
-/// Silence kept either side of the speech, so soft first and last sounds aren't cut.
-const PAD: usize = RATE / 4;
-/// Quiet speech is turned up to peak here (of full scale), by at most MAX_GAIN.
-const LOUDNESS: f32 = 0.7;
-const MAX_GAIN: f32 = 8.0;
-
-/// Audio (int16 scale) as Moonshine wants it: only the speech, without the quiet around it
-/// (less to work through, and no silence to imagine words in), centred and turned up if it's quiet.
-/// Empty when it's all silence.
-fn prepare(audio: &[f32]) -> Vec<f32> {
-    const FRAME: usize = RATE / 50;
-    let levels: Vec<f32> = audio
-        .chunks(FRAME)
-        .map(|f| {
-            let mean = f.iter().sum::<f32>() / f.len() as f32;
-            (f.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / f.len() as f32).sqrt()
-        })
-        .collect();
-    let loudest = levels.iter().copied().fold(0.0, f32::max);
-    let speech = |l: &f32| *l > loudest * 0.1;
-    let (Some(first), Some(last)) = (levels.iter().position(speech), levels.iter().rposition(speech)) else {
-        return Vec::new();
-    };
-    let clip = &audio[(first * FRAME).saturating_sub(PAD)..((last + 1) * FRAME + PAD).min(audio.len())];
-    let mean = clip.iter().sum::<f32>() / clip.len() as f32;
-    let peak = clip.iter().map(|v| (v - mean).abs()).fold(1.0, f32::max) / 32768.0;
-    let gain = (LOUDNESS / peak).min(MAX_GAIN) / 32768.0;
-    clip.iter().map(|v| (v - mean) * gain).collect()
-}
-
-/// Half the cores, up to 4.
-fn stt_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).clamp(1, 4))
 }
 
 const BOS: i64 = 1;
-/// moonshine-base's attention heads and their size, for the decoder's empty memory.
-const HEADS: usize = 8;
-const HEAD_DIM: usize = 52;
 const EOS: i64 = 2;
 
 impl Stt {
@@ -646,40 +505,16 @@ impl Stt {
                 *slot = piece.clone();
             }
         }
-        let decoder = session(env, dir.join("moonshine_decoder_merged.onnx"), stt_threads())?;
-        let past = decoder
-            .inputs()
-            .iter()
-            .map(|i| i.name().to_string())
-            .filter(|n| n.starts_with("past_key_values."))
-            .collect();
         Ok(Stt {
-            encoder: session(env, dir.join("moonshine_encoder.onnx"), stt_threads())?,
-            decoder,
-            past,
+            encoder: session(env, dir.join("moonshine_encoder.onnx"))?,
+            decoder: session(env, dir.join("moonshine_decoder.onnx"))?,
             vocab,
-            last: None,
         })
     }
 
     fn transcribe(&mut self, audio: &[f32]) -> Res<String> {
-        let input = prepare(audio);
-        if input.is_empty() {
-            return Ok(String::new());
-        }
-        if let Some((heard, text)) = &self.last {
-            if *heard == input {
-                return Ok(text.clone());
-            }
-        }
-        let text = self.run(&input)?;
-        self.last = Some((input, text.clone()));
-        Ok(text)
-    }
-
-    fn run(&mut self, input: &[f32]) -> Res<String> {
+        let input: Vec<f32> = audio.iter().map(|s| s / 32768.0).collect();
         let len = input.len();
-        let input = input.to_vec();
         let out = self.encoder.run(ort::inputs!["input_values" => Tensor::from_array(([1, len], input))?])?;
         let (shape, hidden) = out["last_hidden_state"].try_extract_tensor::<f32>()?;
         let hidden = Tensor::from_array(([1, shape[1] as usize, shape[2] as usize], hidden.to_vec()))?;
@@ -688,28 +523,12 @@ impl Stt {
         // About 6 tokens per second of speech is generous; stops runaway loops.
         let max = len / RATE * 6 + 10;
         let mut ids = vec![BOS];
-        // Nothing remembered before the first word.
-        let mut past: Vec<(String, DynValue)> = Vec::with_capacity(self.past.len());
-        for name in &self.past {
-            past.push((name.clone(), Tensor::<f32>::from_array(([1, HEADS, 0, HEAD_DIM], Vec::new()))?.into_dyn()));
-        }
         while ids.len() < max {
-            let cached = ids.len() > 1;
-            let mut inputs: Vec<(std::borrow::Cow<str>, ort::session::SessionInputValue)> = vec![
-                ("input_ids".into(), Tensor::from_array(([1, 1], vec![ids[ids.len() - 1]]))?.into()),
-                ("encoder_hidden_states".into(), hidden.view().into()),
-                ("use_cache_branch".into(), Tensor::from_array(([1], vec![cached]))?.into()),
-            ];
-            inputs.extend(past.iter().map(|(n, v)| (n.as_str().into(), v.view().into())));
-            let mut out = self.decoder.run(inputs)?;
-            for (name, value) in past.iter_mut() {
-                // What it makes of the speech is worked out on the first word and kept.
-                if cached && name.contains(".encoder.") {
-                    continue;
-                }
-                let present = name.replacen("past_key_values", "present", 1);
-                *value = out.remove(&present).ok_or_else(|| format!("decoder gave no {present}"))?;
-            }
+            let n = ids.len();
+            let out = self.decoder.run(ort::inputs![
+                "input_ids" => Tensor::from_array(([1, n], ids.clone()))?,
+                "encoder_hidden_states" => hidden.view(),
+            ])?;
             let (shape, logits) = out["logits"].try_extract_tensor::<f32>()?;
             let last = &logits[logits.len() - shape[2] as usize..];
             let next = last
@@ -764,73 +583,12 @@ mod tests {
         wake.reset();
         let hit = audio
             .chunks_exact(CHUNK)
-            .position(|c| wake.push(c, true).unwrap() > WAKE_THRESHOLD)
+            .position(|c| wake.push(c).unwrap() > WAKE_THRESHOLD)
             .expect("wake word not heard");
         let after = &audio[(hit + 1) * CHUNK..];
         let t = Instant::now();
         let text = stt.transcribe(after).unwrap();
         println!("wake at {:.2}s, heard {text:?} in {:?}", (hit * CHUNK) as f32 / RATE as f32, t.elapsed());
         assert!(text.to_lowercase().contains("focus"));
-    }
-
-    /// Holding quiet audio costs next to nothing and still hears the wake word as it comes.
-    /// Needs wake.wav ("Hey Choco. ...") in CHOCO_MODELS.
-    /// `CHOCO_MODELS=path cargo test --release choco::tests::quiet_room -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn quiet_room() {
-        let dir = PathBuf::from(std::env::var("CHOCO_MODELS").unwrap());
-        let wav = std::fs::read(dir.join("wake.wav")).unwrap();
-        // Ten seconds of a quiet room, then the wake word.
-        let mut audio: Vec<f32> = (0..10 * RATE).map(|i| ((i * 7919 % 61) as f32 - 30.0) * 2.0).collect();
-        audio.extend(wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32));
-        audio.extend(std::iter::repeat(0.0).take(2 * RATE));
-        let env = ort::init().build().unwrap();
-        let mut wake = Wake::new(&env, &dir, WAKE_MODEL).unwrap();
-        let mut scores = |gate: bool| {
-            wake.reset();
-            let t = Instant::now();
-            let s: Vec<f32> = audio.chunks_exact(CHUNK).map(|c| wake.push(c, !gate || rms(c) > 150.0).unwrap()).collect();
-            (s, t.elapsed())
-        };
-        let (always, always_t) = scores(false);
-        let (gated, gated_t) = scores(true);
-        let hit = |s: &[f32]| s.iter().position(|&v| v > WAKE_THRESHOLD);
-        println!("always on: hit at chunk {:?} in {always_t:?}; gated: hit at chunk {:?} in {gated_t:?}", hit(&always), hit(&gated));
-        assert!(hit(&always).is_some());
-        assert_eq!(hit(&always), hit(&gated));
-        // From the first sound on, the gate sees exactly what always-on does.
-        let start = 10 * RATE / CHUNK;
-        for (a, g) in always[start..].iter().zip(&gated[start..]) {
-            assert!((a - g).abs() < 0.02, "{a} vs {g}");
-        }
-    }
-
-    /// How long a command takes to become text, with the quiet a real one ends with.
-    /// `CHOCO_MODELS=path cargo test --release choco::tests::speed -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn speed() {
-        let dir = PathBuf::from(std::env::var("CHOCO_MODELS").unwrap());
-        let wav = std::fs::read(dir.join("test.wav")).unwrap();
-        let mut audio: Vec<f32> = wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32).collect();
-        audio.extend(std::iter::repeat(0.0).take(RATE));
-        let env = ort::init().build().unwrap();
-        let mut stt = Stt::new(&env, &dir).unwrap();
-        for _ in 0..3 {
-            stt.last = None;
-            let t = Instant::now();
-            let text = stt.transcribe(&audio).unwrap();
-            println!("{:?} in {:?}", text, t.elapsed());
-        }
-        // Going on being quiet doesn't change the speech, so the text is already known.
-        let first = stt.transcribe(&audio).unwrap();
-        audio.extend(std::iter::repeat(0.0).take(RATE / 2));
-        let t = Instant::now();
-        assert_eq!(stt.transcribe(&audio).unwrap(), first);
-        println!("again after more quiet in {:?}", t.elapsed());
-        // A quiet microphone is turned up.
-        let soft: Vec<f32> = audio.iter().map(|v| v / 20.0).collect();
-        println!("at 1/20 volume: {:?}", stt.transcribe(&soft).unwrap());
     }
 }
