@@ -3,10 +3,11 @@
 // prompts sent from the island, which run headless (`claude -p`) in the background.
 //
 // `claude-sessions` carries the list whenever it changes, and `claude-done` names a session
-// that just finished a turn. `claude-reply` carries the answer to a prompt sent from here.
+// that just finished a turn. `claude-progress` says what a prompt sent from here is doing, and
+// `claude-reply` carries its answer.
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -28,7 +29,9 @@ const HEAD: u64 = 64 << 10;
 const TOOL_PATIENCE: Duration = Duration::from_secs(20);
 /// Nothing for this long and it isn't working any more (or just done), just idle.
 const GONE_QUIET: Duration = Duration::from_secs(30 * 60);
+/// The list carries this much of each latest reply; picking a session reads up to FULL_CHARS.
 const REPLY_CHARS: usize = 280;
+const FULL_CHARS: usize = 20_000;
 
 #[derive(Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +45,8 @@ pub struct Session {
     pub updated: u64,
     /// The start of its latest reply.
     pub reply: Option<String>,
+    /// The desktop app's own id for it, if the desktop app runs it.
+    pub desktop: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -54,6 +59,8 @@ struct Tail {
     reply: Option<String>,
 }
 
+type DesktopCache = HashMap<PathBuf, (SystemTime, Option<(String, String)>)>;
+
 static SESSIONS: Mutex<Vec<Session>> = Mutex::new(Vec::new());
 
 #[tauri::command]
@@ -64,8 +71,10 @@ pub fn claude_sessions() -> Vec<Session> {
 pub fn spawn(app: AppHandle) {
     std::thread::spawn(move || {
         let mut cache: HashMap<PathBuf, (SystemTime, Tail)> = HashMap::new();
+        let mut desktop_cache = DesktopCache::new();
         loop {
-            let sessions = read_sessions(&mut cache);
+            let desktop = desktop_ids(&mut desktop_cache);
+            let sessions = read_sessions(&mut cache, &desktop);
             let changed = {
                 let mut shown = SESSIONS.lock().unwrap();
                 let finished: Vec<&Session> = sessions
@@ -92,7 +101,42 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
 }
 
-fn read_sessions(cache: &mut HashMap<PathBuf, (SystemTime, Tail)>) -> Vec<Session> {
+/// The desktop app's own ids for the sessions it runs (its `claude://` links take those), by
+/// Claude Code session id. It keeps a small file per session.
+fn desktop_ids(cache: &mut DesktopCache) -> HashMap<String, String> {
+    let roots = [
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("Claude-Data")),
+        std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Claude")),
+    ];
+    // Store installs keep it a level down, in a folder per package.
+    let data: Vec<PathBuf> = roots.into_iter().flatten().flat_map(|r| [vec![r.clone()], dirs(&r)].concat()).collect();
+    let files: Vec<(PathBuf, SystemTime)> = data
+        .iter()
+        .flat_map(|d| dirs(&d.join("claude-code-sessions")))
+        .flat_map(|account| dirs(&account))
+        .flat_map(|org| std::fs::read_dir(org).into_iter().flatten().flatten())
+        .filter(|f| f.file_name().to_string_lossy().starts_with("local_"))
+        .filter_map(|f| Some((f.path(), f.metadata().ok()?.modified().ok()?)))
+        .collect();
+    cache.retain(|p, _| files.iter().any(|(f, _)| f == p));
+    for (path, modified) in files {
+        if cache.get(&path).is_none_or(|(m, _)| *m != modified) {
+            let ids = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|j| {
+                // Archived ones won't open.
+                (j["isArchived"] != true).then_some(())?;
+                Some((j["cliSessionId"].as_str()?.to_string(), j["sessionId"].as_str()?.to_string()))
+            });
+            cache.insert(path, (modified, ids));
+        }
+    }
+    cache.values().filter_map(|(_, ids)| ids.clone()).collect()
+}
+
+fn dirs(path: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(path).into_iter().flatten().flatten().map(|d| d.path()).filter(|p| p.is_dir()).collect()
+}
+
+fn read_sessions(cache: &mut HashMap<PathBuf, (SystemTime, Tail)>, desktop: &HashMap<String, String>) -> Vec<Session> {
     let Some(projects) = home().map(|h| h.join(".claude").join("projects")) else { return Vec::new() };
     let mut files: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(projects)
         .into_iter()
@@ -104,7 +148,7 @@ fn read_sessions(cache: &mut HashMap<PathBuf, (SystemTime, Tail)>) -> Vec<Sessio
         .filter(|f| f.path().extension().is_some_and(|e| e == "jsonl"))
         .filter_map(|f| Some((f.path(), f.metadata().ok()?.modified().ok()?)))
         .collect();
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|f| std::cmp::Reverse(f.1));
     files.truncate(SHOWN);
     cache.retain(|p, _| files.iter().any(|(f, _)| f == p));
 
@@ -138,16 +182,67 @@ fn read_sessions(cache: &mut HashMap<PathBuf, (SystemTime, Tail)>) -> Vec<Sessio
                 .or_else(|| tail.last_prompt.clone())
                 .or_else(|| Path::new(&cwd).file_name().map(|n| n.to_string_lossy().into_owned()))
                 .unwrap_or_else(|| "Untitled".into());
+            let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             Session {
-                id: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                desktop: desktop.get(&id).cloned(),
+                id,
                 title,
                 cwd,
                 status,
                 updated: modified.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
-                reply: tail.reply.clone(),
+                reply: tail.reply.as_deref().map(snippet),
             }
         })
         .collect()
+}
+
+fn snippet(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(REPLY_CHARS).collect()
+}
+
+/// Session ids are UUIDs; anything else isn't looked up (or put on a command line).
+fn valid(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// The whole of a session's latest reply, for when it's picked.
+#[tauri::command]
+pub fn claude_reply(id: String) -> Option<String> {
+    if !valid(&id) {
+        return None;
+    }
+    let projects = home()?.join(".claude").join("projects");
+    let path = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|p| p.exists())?;
+    read_tail(&path).reply
+}
+
+/// Opens the session to carry on there with everything Claude Code can do: in the desktop app
+/// when given its id there, else in a terminal.
+#[tauri::command]
+pub fn claude_open(id: String, cwd: String, desktop: Option<String>) -> Result<(), String> {
+    if let Some(local) = desktop {
+        if !local.strip_prefix("local_").is_some_and(valid) {
+            return Err("Not a session".into());
+        }
+        let link = format!("claude://code/continue?session={local}");
+        return tauri_plugin_opener::open_url(link, None::<&str>).map_err(|e| format!("Couldn't open the desktop app: {e}"));
+    }
+    if !valid(&id) {
+        return Err("Not a session".into());
+    }
+    let claude = exe();
+    let terminal = Command::new("wt.exe").arg("-d").arg(&cwd).arg(&claude).args(["--resume", &id]).spawn();
+    if terminal.is_err() {
+        // No Windows Terminal: a plain console window.
+        Command::new("cmd")
+            .current_dir(&cwd)
+            .args(["/c", "start", "Claude Code"])
+            .arg(&claude)
+            .args(["--resume", &id])
+            .spawn()
+            .map_err(|e| format!("Couldn't open a terminal: {e}"))?;
+    }
+    Ok(())
 }
 
 fn read_tail(path: &Path) -> Tail {
@@ -202,10 +297,10 @@ fn read_entry(entry: &Value, tail: &mut Tail) {
                 .filter(|c| c["type"] == "text")
                 .filter_map(|c| c["text"].as_str())
                 .collect::<Vec<_>>()
-                .join(" ");
-            let said = said.split_whitespace().collect::<Vec<_>>().join(" ");
+                .join("\n\n");
+            let said = said.trim();
             if !said.is_empty() {
-                tail.reply = Some(said.chars().take(REPLY_CHARS).collect());
+                tail.reply = Some(said.chars().take(FULL_CHARS).collect());
             }
         }
         _ => {}
@@ -227,15 +322,20 @@ struct Reply {
 #[tauri::command]
 pub fn claude_send(app: AppHandle, prompt: String, cwd: String, session: Option<String>) {
     std::thread::spawn(move || {
-        let reply = run(&prompt, &cwd, session.as_deref()).unwrap_or_else(|e| Reply { session: session.clone(), text: e, ok: false });
+        let reply = run(&app, &prompt, &cwd, session.as_deref()).unwrap_or_else(|e| Reply { session: session.clone(), text: e, ok: false });
         let _ = app.emit("claude-reply", reply);
     });
 }
 
-fn run(prompt: &str, cwd: &str, session: Option<&str>) -> Result<Reply, String> {
+fn exe() -> PathBuf {
     let installed = home().map(|h| h.join(".local").join("bin").join("claude.exe")).filter(|p| p.exists());
-    let mut cmd = Command::new(installed.unwrap_or_else(|| PathBuf::from("claude")));
-    cmd.args(["-p", "--output-format", "json"]);
+    installed.unwrap_or_else(|| PathBuf::from("claude"))
+}
+
+fn run(app: &AppHandle, prompt: &str, cwd: &str, session: Option<&str>) -> Result<Reply, String> {
+    let mut cmd = Command::new(exe());
+    // A stream of events, so the island can say what it's doing as it goes.
+    cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
     if let Some(id) = session {
         cmd.args(["--resume", id]);
     }
@@ -249,15 +349,65 @@ fn run(prompt: &str, cwd: &str, session: Option<&str>) -> Result<Reply, String> 
     }
     let mut child = cmd.spawn().map_err(|e| format!("Couldn't start Claude Code: {e}"))?;
     child.stdin.take().ok_or("no stdin")?.write_all(prompt.as_bytes()).map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let json: Value = serde_json::from_slice(&out.stdout).map_err(|_| {
-        let err = String::from_utf8_lossy(&out.stderr);
+    // Read on the side, so a chatty stderr can't fill its pipe and stall the run.
+    let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let mut result = None;
+    for line in BufReader::new(child.stdout.take().ok_or("no stdout")?).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
+        match event["type"].as_str() {
+            Some("assistant") => {
+                if let Some(doing) = doing(&event["message"]) {
+                    let _ = app.emit("claude-progress", doing);
+                }
+            }
+            Some("result") => result = Some(event),
+            _ => {}
+        }
+    }
+    let _ = child.wait();
+    let json = result.ok_or_else(|| {
+        let err = errors.join().unwrap_or_default();
         format!("Claude Code failed: {}", err.trim().lines().last().unwrap_or("no output"))
     })?;
-    Ok(Reply {
-        session: json["session_id"].as_str().map(str::to_string),
-        text: json["result"].as_str().unwrap_or("").trim().to_string(),
-        ok: json["is_error"] != true,
+    let text = json["result"].as_str().unwrap_or("").trim();
+    let ok = json["is_error"] != true;
+    // The command line signs in apart from the desktop app.
+    let text = if !ok && text.starts_with("Not logged in") {
+        "Claude Code isn't signed in here. Open a terminal, run claude, then type /login.".to_string()
+    } else {
+        text.to_string()
+    };
+    Ok(Reply { session: json["session_id"].as_str().map(str::to_string), text, ok })
+}
+
+/// What a step of a run is doing, in a few words.
+fn doing(message: &Value) -> Option<String> {
+    let last = message["content"].as_array()?.last()?;
+    if last["type"] == "text" {
+        return Some("Writing the answer".into());
+    }
+    if last["type"] != "tool_use" {
+        return None;
+    }
+    let input = &last["input"];
+    let file = input["file_path"]
+        .as_str()
+        .or(input["path"].as_str())
+        .and_then(|p| Path::new(p).file_name())
+        .map(|n| n.to_string_lossy().into_owned());
+    Some(match (last["name"].as_str().unwrap_or("a tool"), file) {
+        ("Read", Some(f)) => format!("Reading {f}"),
+        ("Edit" | "Write" | "MultiEdit" | "NotebookEdit", Some(f)) => format!("Editing {f}"),
+        ("Grep" | "Glob", _) => "Searching".into(),
+        ("Bash" | "PowerShell", _) => "Running a command".into(),
+        ("WebSearch" | "WebFetch", _) => "Looking online".into(),
+        ("Agent" | "Task", _) => "Sending a helper".into(),
+        (name, _) => format!("Using {name}"),
     })
 }
 
@@ -281,6 +431,16 @@ mod tests {
         assert_eq!(tail.title.as_deref(), Some("Fix the build"));
         assert_eq!(tail.cwd.as_deref(), Some("C:\\code\\app"));
         assert_eq!(tail.last, Some(Some("end_turn".into())));
-        assert_eq!(tail.reply.as_deref(), Some("All green."));
+        assert_eq!(tail.reply.as_deref().map(snippet).as_deref(), Some("All green."));
+    }
+
+    #[test]
+    fn says_what_a_step_is_doing() {
+        let step = |c: &str| doing(&serde_json::from_str(&format!(r#"{{"content":[{c}]}}"#)).unwrap());
+        assert_eq!(step(r#"{"type":"tool_use","name":"Read","input":{"file_path":"C:\\a\\b.rs"}}"#).as_deref(), Some("Reading b.rs"));
+        assert_eq!(step(r#"{"type":"tool_use","name":"Grep","input":{"pattern":"x"}}"#).as_deref(), Some("Searching"));
+        assert_eq!(step(r#"{"type":"text","text":"hi"}"#).as_deref(), Some("Writing the answer"));
+        assert_eq!(step(r#"{"type":"thinking"}"#), None);
+        assert!(!valid("../x") && valid("8be4-7f0a"));
     }
 }

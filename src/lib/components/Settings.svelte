@@ -6,7 +6,18 @@
   import { choco, type Sensitivity } from '$lib/choco.svelte';
   import { focus, LENGTH } from '$lib/focus.svelte';
   import { pet, type Distance, type Energy } from '$lib/pet.svelte';
-  import { setColour, setTuck, setWave, startTyping, stopTyping, ui, type Colour, type WaveStyle } from '$lib/ui.svelte';
+  import {
+    setClaudeOpen,
+    setColour,
+    setTuck,
+    setWave,
+    startTyping,
+    stopTyping,
+    ui,
+    type ClaudeOpen,
+    type Colour,
+    type WaveStyle,
+  } from '$lib/ui.svelte';
   import { water } from '$lib/water.svelte';
   import IconButton from './IconButton.svelte';
   import Segmented from './Segmented.svelte';
@@ -30,6 +41,10 @@
     { value: 'bars', label: 'Bars' },
     { value: 'mirror', label: 'Mirror' },
     { value: 'dots', label: 'Dots' },
+  ];
+  const CLAUDE_OPEN: { value: ClaudeOpen; label: string }[] = [
+    { value: 'desktop', label: 'Desktop' },
+    { value: 'terminal', label: 'CLI' },
   ];
   const DISTANCES: { value: Distance; label: string }[] = [
     { value: 'close', label: 'Near' },
@@ -161,6 +176,10 @@
 
       <h3>System</h3>
       <div class="row"><span>Start with Windows</span><Toggle label="Start with Windows" on={autostart} onchange={setAutostart} /></div>
+      <div class="row">
+        <span title="Sessions the desktop app doesn't run open in a terminal">Open Claude in</span>
+        <Segmented options={CLAUDE_OPEN} value={ui.claudeOpen} onchange={setClaudeOpen} />
+      </div>
     </section>
 
     <section>

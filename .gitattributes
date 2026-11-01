@@ -1,0 +1,2 @@
+# Keep every text file LF, here and in the repo, whatever the OS.
+* text=auto eol=lf

@@ -8,6 +8,7 @@
 //! Events to the island: `circle-asked` {question}, then `circle-answer` {question, reply}.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,10 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindo
 
 use crate::ai::{Job, Provider};
 use crate::computer::CLAUDE_URL;
+
+/// Closed this long, the overlay's WebView2 is freed; the next press builds it again.
+const KEEP_WARM: Duration = Duration::from_secs(120);
+static CLOSED_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// The circled part goes out at most this many pixels on its long side.
 const MAX_SIDE: i32 = 1024;
@@ -39,6 +44,10 @@ pub fn spawn(app: AppHandle) {
         let mut claimed = false;
         loop {
             std::thread::sleep(Duration::from_millis(50));
+            let cold = CLOSED_AT.lock().unwrap().take_if(|t| t.elapsed() >= KEEP_WARM).is_some();
+            if let Some(w) = app.get_webview_window("circle").filter(|_| cold) {
+                let _ = w.destroy();
+            }
             if crate::game::on() {
                 // Nothing may pop up over a game, and the keys are the game's.
                 if let Some(w) = app.get_webview_window("circle") {
@@ -71,6 +80,7 @@ pub fn spawn(app: AppHandle) {
 fn close(window: &WebviewWindow) {
     STOP_LISTENING.store(true, Ordering::Relaxed);
     let _ = window.hide();
+    CLOSED_AT.lock().unwrap().get_or_insert_with(Instant::now);
 }
 
 fn open(app: &AppHandle) -> tauri::Result<()> {
@@ -83,6 +93,7 @@ fn open(app: &AppHandle) -> tauri::Result<()> {
         window.set_position(*m.position())?;
         window.set_size(*m.size())?;
     }
+    *CLOSED_AT.lock().unwrap() = None;
     let _ = app.emit_to("circle", "circle-open", ());
     window.show()?;
     window.set_focus()?;

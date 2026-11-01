@@ -8,6 +8,9 @@ export type Colour = 'soft' | 'mono';
 /** How the music waves behind Now Playing are drawn. */
 export type WaveStyle = 'line' | 'bars' | 'mirror' | 'dots';
 
+/** Where a Claude Code session opens from the island. */
+export type ClaudeOpen = 'desktop' | 'terminal';
+
 export const ui = $state({
   /** A text field has the keyboard; the island stays open until it's done. */
   typing: false,
@@ -17,7 +20,13 @@ export const ui = $state({
   /** Docked on a side, the resting pill tucks into the edge with just a sliver showing. */
   tuck: load('tuck', false),
   wave: load<WaveStyle>('wave', 'line'),
+  claudeOpen: load<ClaudeOpen>('claudeOpen', 'desktop'),
 });
+
+export function setClaudeOpen(where: ClaudeOpen) {
+  ui.claudeOpen = where;
+  save('claudeOpen', where);
+}
 
 export function setWave(style: WaveStyle) {
   ui.wave = style;

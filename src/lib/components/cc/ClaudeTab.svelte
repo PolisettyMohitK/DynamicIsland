@@ -3,7 +3,7 @@
   // send a prompt, continuing the picked session or starting one in a recent folder.
   import { claude, type ClaudeSession } from '$lib/claude.svelte';
   import { clock } from '$lib/clock.svelte';
-  import { startTyping, stopTyping } from '$lib/ui.svelte';
+  import { startTyping, stopTyping, ui } from '$lib/ui.svelte';
   import Icon from '../Icon.svelte';
 
   const STATUS = { working: 'Working', waiting: 'Waiting', done: 'Done', stopped: 'Idle' } as const;
@@ -13,6 +13,8 @@
   let text = $state('');
   let field = $state<HTMLInputElement>();
   let folderAt = $state(0);
+  /** The picked session's whole latest reply, once read. */
+  let full = $state<string | null>(null);
 
   const selected = $derived(claude.sessions.find((s) => s.id === picked));
   /** New sessions start in one of the recent sessions' folders. */
@@ -20,6 +22,8 @@
   const folder = $derived(folders.length ? folders[folderAt % folders.length] : '');
   /** Running somewhere else; a second prompt into it would tangle the two. */
   const busy = (s: ClaudeSession) => s.status === 'working' || s.status === 'waiting';
+  /** Opens in the desktop app if that's the pick and it runs this one; otherwise a terminal. */
+  const inDesktop = (s: ClaudeSession) => ui.claudeOpen === 'desktop' && !!s.desktop;
   const blocked = $derived(claude.sending || (selected ? busy(selected) : !folder));
   const name = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
@@ -41,6 +45,16 @@
     stopTyping();
   }
 
+  $effect(() => {
+    full = null;
+    if (!selected) return;
+    const id = selected.id;
+    void selected.updated; // read it again when the session moves on
+    let live = true;
+    claude.fullReply(id).then((text) => live && (full = text));
+    return () => (live = false);
+  });
+
   $effect(() => () => stopTyping());
 </script>
 
@@ -51,8 +65,14 @@
       <span class="title">{s.title}</span>
       <span class="meta">{name(s.cwd)} · {ago(s.updated)}</span>
     </button>
-    {#if picked === s.id && s.reply}
-      <p class="said">{s.reply}</p>
+    {#if picked === s.id}
+      <div class="more">
+        {#if full ?? s.reply}<p class="said">{full ?? s.reply}</p>{/if}
+        <!-- Only a second terminal on a busy session would tangle; the desktop app just shows it. -->
+        <button class="open" disabled={!inDesktop(s) && (busy(s) || !s.cwd)} onclick={() => claude.open(s, inDesktop(s))}>
+          {inDesktop(s) ? 'Open in desktop app' : 'Open in terminal'}
+        </button>
+      </div>
     {/if}
   {:else}
     <p class="empty">Your Claude Code sessions show up here.</p>
@@ -78,7 +98,7 @@
     bind:this={field}
     bind:value={text}
     placeholder={claude.sending
-      ? 'Claude is on it…'
+      ? `${claude.progress ?? 'Claude is on it'}…`
       : selected && busy(selected)
         ? 'Busy in another window'
         : selected
@@ -168,17 +188,40 @@
       opacity: 0.35;
     }
   }
+  .more {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 2px 14px 6px 31px;
+  }
   .said {
     margin: 0;
-    padding: 2px 14px 6px 31px;
+    max-height: 132px;
+    overflow-y: auto;
+    scrollbar-width: none;
     font-size: 12px;
     line-height: 1.45;
     color: var(--text-dim);
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
+    white-space: pre-wrap;
+  }
+  .open {
+    height: 24px;
+    padding: 0 10px;
+    border-radius: 12px;
+    font-size: 11.5px;
+    font-weight: 600;
+    background: var(--pill);
+    color: var(--text-dim);
+  }
+  .open:not(:disabled):hover {
+    color: var(--text);
+    background: var(--pill-hover);
+  }
+  .open:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .empty {
     margin: 0;

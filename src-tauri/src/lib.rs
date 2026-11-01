@@ -167,6 +167,8 @@ pub fn run() {
             waves::waves_stop,
             claude::claude_sessions,
             claude::claude_send,
+            claude::claude_reply,
+            claude::claude_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Dynamic Island");
