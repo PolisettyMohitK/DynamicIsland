@@ -488,6 +488,23 @@
 
 <svelte:window bind:innerWidth={winW} bind:innerHeight={winH} />
 
+<!-- Page arrows and dots, on the lyrics layout too so you can still leave it. -->
+{#snippet pager()}
+  <!-- Arrows stay hidden until the cursor nears an edge. -->
+  <div class="edge left">
+    <button class="nav" aria-label="Previous page" onclick={() => go(-1)}><Icon name="chevron-left" size={16} /></button>
+  </div>
+  <div class="edge right">
+    <button class="nav" aria-label="Next page" onclick={() => go(1)}><Icon name="chevron-right" size={16} /></button>
+  </div>
+
+  <div class="dots">
+    {#each PAGES as p, i}
+      <button class="dot" class:active={i === page} aria-label={p.name} onclick={() => goTo(i)}><i></i></button>
+    {/each}
+  </div>
+{/snippet}
+
 <!-- Dragging it moves it; the parts inside are the controls. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
@@ -545,6 +562,7 @@
       {#if wide}
         <div class="panel wide" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
           <LyricsView onLyrics={toggleLyrics} />
+          {@render pager()}
         </div>
       {:else}
         <div class="panel" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
@@ -581,19 +599,7 @@
             <IconButton icon="settings" size={24} quiet label="Settings" onclick={() => play(['settings', 0])} />
           </header>
 
-          <!-- Arrows stay hidden until the cursor nears an edge. -->
-          <div class="edge left">
-            <button class="nav" aria-label="Previous page" onclick={() => go(-1)}><Icon name="chevron-left" size={16} /></button>
-          </div>
-          <div class="edge right">
-            <button class="nav" aria-label="Next page" onclick={() => go(1)}><Icon name="chevron-right" size={16} /></button>
-          </div>
-
-          <div class="dots">
-            {#each PAGES as p, i}
-              <button class="dot" class:active={i === page} aria-label={p.name} onclick={() => goTo(i)}><i></i></button>
-            {/each}
-          </div>
+          {@render pager()}
         </div>
       {/if}
     </div>

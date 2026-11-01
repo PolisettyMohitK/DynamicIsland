@@ -308,7 +308,8 @@ fn listen(app: &AppHandle, choco: &Choco, wake: &mut Wake) -> Res<()> {
                     // quickly, up slowly, so a fan or music becomes the new quiet but a word doesn't.
                     let rate = if level < floor { 0.05 } else { 0.01 };
                     floor = (floor * (1.0 - rate) + level * rate).max(50.0);
-                    if wake.push(&chunk, level > floor * 1.5)? >f32::from_bits(choco.threshold.load(Ordering::Relaxed)) {
+                    let threshold = f32::from_bits(choco.threshold.load(Ordering::Relaxed));
+                    if wake.hears(&chunk, level > floor * 1.5, threshold)? {
                         command = Some(Command::start(app, false));
                     }
                 }
@@ -504,6 +505,10 @@ const WAKE_HANGOVER: usize = 16;
 /// Enough held audio to rebuild everything the detector looks at once sound comes back:
 /// 16 embeddings, the first of which looks back 76 mel frames (8 per chunk).
 const WAKE_BACKLOG: usize = 16 + 76 / 8 + 1;
+/// Chunks in a row (80ms each) the score must stay over the threshold. "Hey Choco" holds it
+/// for 6 or more; words that only sound a bit like it ("chocolate", "cocoa", "chuck it") spike
+/// for one or two.
+const WAKE_PATIENCE: usize = 4;
 
 /// openWakeWord: audio → mel frames → speech embeddings → "hey choco" score.
 /// In a quiet room it does nothing until there's sound, then catches up on what it held.
@@ -520,6 +525,8 @@ struct Wake {
     held: VecDeque<Vec<f32>>,
     /// Chunks since the last one with sound in it.
     quiet: usize,
+    /// Chunks in a row scoring over the threshold.
+    streak: usize,
 }
 
 impl Wake {
@@ -536,6 +543,7 @@ impl Wake {
             embeddings: VecDeque::new(),
             held: VecDeque::new(),
             quiet: 0,
+            streak: 0,
         })
     }
 
@@ -545,6 +553,13 @@ impl Wake {
         self.embeddings.clear();
         self.held.clear();
         self.quiet = 0;
+        self.streak = 0;
+    }
+
+    /// "Hey Choco" was said: the score has stayed over `threshold` for WAKE_PATIENCE chunks.
+    fn hears(&mut self, chunk: &[f32], sound: bool, threshold: f32) -> Res<bool> {
+        self.streak = if self.push(chunk, sound)? > threshold { self.streak + 1 } else { 0 };
+        Ok(self.streak >= WAKE_PATIENCE)
     }
 
     /// The wake score after this chunk; `sound` says whether it's louder than the room.
@@ -821,6 +836,41 @@ mod tests {
         for (a, g) in always[start..].iter().zip(&gated[start..]) {
             assert!((a - g).abs() < 0.02, "{a} vs {g}");
         }
+    }
+
+    /// Every "Hey Choco" clip in CHOCO_MODELS/pos wakes Choco; few of the look-alike phrases in
+    /// /neg do. Clips are 16kHz mono wavs (tools: Windows text-to-speech).
+    /// `CHOCO_MODELS=path cargo test --release choco::tests::wake_clips -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn wake_clips() {
+        let dir = PathBuf::from(std::env::var("CHOCO_MODELS").unwrap());
+        let env = ort::init().build().unwrap();
+        let mut wake = Wake::new(&env, &dir, WAKE_MODEL).unwrap();
+        let room = |n: usize| (0..n).map(|i| ((i * 7919 % 61) as f32 - 30.0) * 2.0);
+        let mut woke = |kind: &str| -> (usize, Vec<String>) {
+            let mut files: Vec<_> = std::fs::read_dir(dir.join(kind)).unwrap().map(|e| e.unwrap().path()).collect();
+            files.sort();
+            let hits: Vec<String> = files
+                .iter()
+                .filter(|f| {
+                    let wav = std::fs::read(f).unwrap();
+                    let at = wav.windows(4).position(|w| w == b"data").unwrap() + 8;
+                    let mut audio: Vec<f32> = room(RATE).collect();
+                    audio.extend(wav[at..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 * 0.5));
+                    audio.extend(room(3 * RATE / 2));
+                    wake.reset();
+                    audio.chunks_exact(CHUNK).any(|c| wake.hears(c, true, WAKE_THRESHOLD).unwrap())
+                })
+                .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            (files.len(), hits)
+        };
+        let (pos, pos_hits) = woke("pos");
+        let (neg, neg_hits) = woke("neg");
+        println!("woke on {}/{pos} wake clips, {}/{neg} others: {neg_hits:?}", pos_hits.len(), neg_hits.len());
+        assert_eq!(pos_hits.len(), pos);
+        assert!(neg_hits.len() * 10 <= neg, "too many false wakes");
     }
 
     /// Soft speech on a quiet laptop mic, with a thinking pause mid-sentence, is kept whole.
