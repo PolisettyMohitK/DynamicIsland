@@ -1,5 +1,11 @@
+<script module lang="ts">
+  /** The tab last open, to come back to when the island reopens soon after closing. */
+  let lastTab = 'Controls';
+</script>
+
 <script lang="ts">
   import { fade } from 'svelte/transition';
+  import { remembers } from '$lib/ui.svelte';
   import { control, type PowerAction } from '$lib/control.svelte';
   import { nowPlaying } from '$lib/media.svelte';
   import { status } from '$lib/status.svelte';
@@ -12,6 +18,9 @@
   import StatsTab from './cc/StatsTab.svelte';
   import TodayTab from './cc/TodayTab.svelte';
   import WallpaperTab from './cc/WallpaperTab.svelte';
+
+  /** Narrower on a side (Island.svelte). */
+  let { width }: { width: number } = $props();
 
   const TABS = ['Controls', 'Today', 'Claude', 'Stats', 'Clipboard', 'Apps', 'Wallpaper', 'Power'] as const;
   const POWER: { action: PowerAction; label: string; icon: IconName; confirm?: boolean }[] = [
@@ -26,7 +35,10 @@
   /** A wheel or trackpad flick moves one tab, then waits this long before the next. */
   const WHEEL_GAP = 160;
 
-  let tab = $state<(typeof TABS)[number]>('Controls');
+  let tab = $state<(typeof TABS)[number]>(remembers() ? (lastTab as (typeof TABS)[number]) : 'Controls');
+  $effect(() => {
+    lastTab = tab;
+  });
   let picking = $state(false);
   let armed = $state<PowerAction | null>(null);
   let disarm: ReturnType<typeof setTimeout>;
@@ -80,7 +92,7 @@
   }
 </script>
 
-<div class="cc">
+<div class="cc" style="width: {width}px">
   <!-- Tabs further from the open one blur and fade towards the ends. -->
   <nav bind:clientWidth={stripW} onwheel={onWheel}>
     <div class="track" style="transform: translateX({shift}px)">
@@ -219,7 +231,6 @@
 
 <style>
   .cc {
-    width: 560px;
     padding: 12px 16px 16px;
     display: flex;
     flex-direction: column;
@@ -235,10 +246,6 @@
     gap: 4px;
     width: max-content;
     transition: transform 420ms var(--spring);
-  }
-  /* Docked on a side it's narrower. */
-  :global(.side) .cc {
-    width: 400px;
   }
   .tab {
     height: 32px;
@@ -283,6 +290,13 @@
   }
   .five {
     grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+  /* On a side the row of three tiles is two and one, so none gets squeezed. */
+  :global(.side) .three {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  :global(.side) .three > :last-child {
+    grid-column: span 2;
   }
   button {
     font: inherit;

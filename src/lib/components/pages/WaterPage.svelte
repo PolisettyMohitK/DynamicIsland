@@ -129,4 +129,17 @@
     font-weight: 600;
     text-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   }
+  /* On a side the orb sits on top, the amount centred under it. */
+  :global(.side) .orb {
+    right: auto;
+    left: 50%;
+    translate: -50% 0;
+    top: 76px;
+  }
+  :global(.side) .text {
+    left: 0;
+    right: 0;
+    top: 196px;
+    align-items: center;
+  }
 </style>

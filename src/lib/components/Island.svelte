@@ -18,9 +18,9 @@
   import { mmss } from '$lib/store';
   import { todos } from '$lib/todos.svelte';
   import { serveSettings } from '$lib/settings-host.svelte';
-  import { setLyrics, ui } from '$lib/ui.svelte';
+  import { closed, remembers, setLyrics, ui } from '$lib/ui.svelte';
   import { water } from '$lib/water.svelte';
-  import { ISLAND_GAP, islandRect, type Dock, type Shape } from '$lib/glass';
+  import { ISLAND_GAP, earOf, islandRect, type Dock, type Shape } from '$lib/glass';
   import Answer from './Answer.svelte';
   import Bars from './Bars.svelte';
   import BatteryRing from './BatteryRing.svelte';
@@ -65,17 +65,22 @@
   const AWAY: Shape = { w: 64, h: 22, r: 11 };
   /** The resting pill while Choco sleeps in it: the time on its left, the day on its right. */
   const SLEEPING: Shape = { w: 184, h: 32, r: 16 };
-  // Docked on a side the window is narrow and tall: resting states stand upright, and open
-  // ones are SIDE_W wide and stack what sits side by side at the top.
+  // Docked on a side everything is taller than it is wide: resting states stand upright, the
+  // pages are a tall card that pages top to bottom, and the bars stack their parts.
   const SIDE_W = 400;
   const SIDE_SHAPES: typeof SHAPES = {
-    ...SHAPES,
     idle: { w: 32, h: 64, r: 16 },
     live: { w: 40, h: 200, r: 20 },
     peek: { w: 56, h: 112, r: 28 },
-    expanded: { w: SIDE_W, h: 180, r: 32 },
-    wide: { w: SIDE_W, h: 360, r: 32 },
+    expanded: { w: 340, h: 360, r: 32 },
+    wide: { w: 340, h: 360, r: 32 },
+    popup: { w: 120, h: 132, r: 28 },
+    voice: { w: 220, h: 160, r: 28 },
+    dictate: { w: 220, h: 160, r: 28 },
+    work: { w: 260, h: 184, r: 28 },
   };
+  /** A popup with a level (volume, brightness) on a side: the level rises up a bar. */
+  const SIDE_LEVEL_H = 240;
   const SIDE_AWAY: Shape = { w: 22, h: 64, r: 11 };
   const SIDE_SLEEPING: Shape = { w: 48, h: 120, r: 24 };
   /** How much of the resting pill shows when it's tucked into a side edge. */
@@ -118,10 +123,9 @@
   let dock = $state<Dock>('top');
   const side = $derived(dock !== 'top');
   const shapes = $derived(side ? SIDE_SHAPES : SHAPES);
-  /** Being carried to another edge (island.rs moves the window). */
+  /** Being carried to another edge (island.rs moves the window), until it gets there. */
   let dragging = $state(false);
-  /** Just docked somewhere new: jump to the new layout rather than animate across. */
-  let snapping = $state(false);
+  let islandEl: HTMLDivElement;
   let winW = $state(innerWidth);
   let winH = $state(innerHeight);
 
@@ -161,11 +165,13 @@
           ? { w: side ? SIDE_W : CONTROL_W, h: fit(Math.max(120, controlH)), r: 36 }
         : mode === 'settings'
           ? { w: side ? SIDE_W : SETTINGS_W, h: fit(Math.max(180, settingsH)), r: 32 }
+          : mode === 'popup' && side && popup.level !== undefined
+            ? { ...shapes.popup, h: SIDE_LEVEL_H }
           : mode === 'idle' && petOut
             ? away
             : mode === 'idle' && idleMood === 'sleep'
               ? sleeping
-              : mode === 'voice' && said
+              : mode === 'voice' && said && !side
                 ? { ...shapes.voice, w: VOICE_SAID_W }
                 : shapes[mode],
   );
@@ -173,6 +179,8 @@
   const restGap = (s: Shape) => (side && ui.tuck ? TUCK_SHOWS - s.w : ISLAND_GAP);
   /** Resting, the island floats off its edge; open, it's flush with it, as if it grew out of it. */
   const gap = $derived(mode === 'idle' ? restGap(shape) : mode === 'live' ? ISLAND_GAP : 0);
+  /** Off its edge, all its corners are round; flush, the two against the edge seep out into it. */
+  const floating = $derived(gap > 0 || dragging);
   const voice = $derived(mode === 'voice' || mode === 'work' || mode === 'answer');
   const grow = $derived(
     mode === 'expanded' || mode === 'settings' || mode === 'control' || mode === 'popup' || mode === 'live' || mode === 'dictate' || voice,
@@ -219,11 +227,22 @@
       'rest' resolves when its step fires, so it lands on the right resting state. */
   function play(...steps: [Mode | 'rest', number][]) {
     timers.forEach(clearTimeout);
-    timers = steps.map(([m, at]) => setTimeout(() => (mode = m === 'rest' ? rest : m), at));
+    timers = steps.map(([m, at]) =>
+      setTimeout(() => {
+        if (m === 'rest' && (mode === 'expanded' || mode === 'settings' || mode === 'control')) {
+          left = mode;
+          closed.at = Date.now();
+        }
+        mode = m === 'rest' ? rest : m;
+      }, at),
+    );
   }
+  /** What was open when the island last closed, to reopen if it's back soon (ui.remembers). */
+  let left: Mode = 'expanded';
 
   function onEnter() {
     hovered = true;
+    entered = hitOf(shape, gap);
     // Hovering its bed wakes the pet, and out it hops.
     if (pet.home) pet.wake('hover');
     // Choco keeps the island until it has answered; the cursor holds an answer up.
@@ -238,11 +257,12 @@
       return;
     }
     // The backend polls hover every 30ms, so these land close to Nusa's ~100ms / ~330ms.
-    play(['peek', 50], ['expanded', 290]);
+    play(['peek', 50], [remembers() ? left : 'expanded', 290]);
   }
 
   function onLeave() {
     hovered = false;
+    entered = null;
     choco.hold(false);
     // Typing into a field keeps the island open until the field is done.
     if (ui.typing || choco.busy || dictation.state !== 'idle') return;
@@ -252,9 +272,10 @@
       missed = null;
       showPopup(p);
     } else if (mode === 'expanded' || mode === 'settings' || mode === 'control')
-      // A slip of the cursor shouldn't close it: hold a moment before collapsing.
-      play(['peek', LEAVE_HOLD], ['rest', LEAVE_HOLD + 120]);
-    else if (mode === 'popup') play(['peek', 0], ['rest', 120]);
+      // A slip of the cursor shouldn't close it: hold a moment before collapsing. It goes
+      // straight to rest, in one spring: retargeted on the way, a spring sets off again from
+      // standing, so it would stall halfway.
+      play(['rest', LEAVE_HOLD]);
     else play(['rest', 0]);
   }
 
@@ -288,11 +309,26 @@
     e.preventDefault();
   }
 
-  function docked(d: Dock) {
-    if (d === dock) return;
+  /** Let go: take the layout for edge `d`, offset to stay just where it was dropped, then fly home
+      inside the window while island.rs flies the window home along the same spring, so on screen
+      it goes in one line. On load it just takes the layout. */
+  function docked(d: Dock, fly = true) {
+    const box = islandEl.getBoundingClientRect();
     dock = d;
-    snapping = true;
-    requestAnimationFrame(() => requestAnimationFrame(() => (snapping = false)));
+    if (!fly) return;
+    const home = islandRect(dock, gap, winW, winH, { w: box.width, h: box.height, r: 0 });
+    const dx = box.x + box.width / 2 - (home.x + home.w / 2);
+    const dy = box.y + box.height / 2 - (home.y + home.h / 2);
+    const css = getComputedStyle(document.documentElement);
+    // The build may write the time in seconds.
+    const t = css.getPropertyValue('--fly-t').trim();
+    if (dx || dy)
+      islandEl.animate(
+        { translate: [`${dx}px ${dy}px`, '0 0'] },
+        { duration: parseFloat(t) * (t.endsWith('ms') ? 1 : 1000), easing: css.getPropertyValue('--fly').trim() },
+      );
+    // Both start on the same frame.
+    requestAnimationFrame(() => invoke('island_fly'));
   }
 
   function showPopup(next: Popup) {
@@ -305,8 +341,7 @@
     // A reminder (one that holds) sends the pet running to the cursor.
     if (next.hold) pet.wake('nudge');
     const hold = next.hold ?? 1200;
-    if (mode === 'popup') play(['popup', 0], ['peek', hold], ['rest', hold + 120]);
-    else play(['peek', 0], ['popup', 100], ['peek', hold + 100], ['rest', hold + 220]);
+    play(['popup', 0], ['rest', hold]);
   }
 
   function go(delta: number) {
@@ -344,18 +379,36 @@
     }
   }
 
-  // Tell the backend where the island is so clicks elsewhere pass through to the desktop. It
-  // reaches back to the screen edge, so the gap counts too; a tucked pill is just its sliver.
+  type Hit = { x: number; y: number; width: number; height: number };
+  /** Where the island takes the cursor: it reaches back to the screen edge, so the gap counts
+      too; a tucked pill is just its sliver. */
+  function hitOf(s: Shape, g: number): Hit {
+    const r = islandRect(dock, g, winW, winH, s);
+    return dock === 'top'
+      ? { x: r.x, y: 0, width: r.w, height: r.y + r.h }
+      : dock === 'left'
+        ? { x: 0, y: r.y, width: r.x + r.w, height: r.h }
+        : { x: r.x, y: r.y, width: winW - r.x, height: r.h };
+  }
+  /** Where the cursor came in, kept part of the island until it leaves. On the way open the
+      island peeks, and the peek is shorter than the pill and its gap, and narrower than the live
+      pill: without this it would slip out from under the cursor, close, come back under it, open,
+      and so on, many times a second. */
+  let entered = $state<Hit | null>(null);
+
+  // Tell the backend where the island is so clicks elsewhere pass through to the desktop.
   $effect(() => {
-    const r = islandRect(dock, gap, winW, winH, shape);
-    invoke(
-      'set_hit_size',
-      dock === 'top'
-        ? { x: r.x, y: 0, width: r.w, height: r.y + r.h }
-        : dock === 'left'
-          ? { x: 0, y: r.y, width: r.x + r.w, height: r.h }
-          : { x: r.x, y: r.y, width: winW - r.x, height: r.h },
-    );
+    const h = hitOf(shape, gap);
+    const e = entered;
+    if (!e) return void invoke('set_hit_size', h);
+    const x = Math.min(h.x, e.x);
+    const y = Math.min(h.y, e.y);
+    invoke('set_hit_size', {
+      x,
+      y,
+      width: Math.max(h.x + h.width, e.x + e.width) - x,
+      height: Math.max(h.y + h.height, e.y + e.height) - y,
+    });
   });
 
   // The clock ticks twice a second while the island is open; resting, it only wakes on the
@@ -470,6 +523,14 @@
   $effect(() => nowPlaying.start());
   $effect(() => serveSettings());
 
+  // The first time text is set in each font and weight is slow, and it used to land on the first
+  // open, which stuttered: set it all once on load, out of sight, and drop it.
+  let warm = $state(true);
+  $effect(() => {
+    const id = setTimeout(() => (warm = false), 3000);
+    return () => clearTimeout(id);
+  });
+
   $effect(() => {
     const unlisten = [
       listen<boolean>('island-hover', (e) => (e.payload ? onEnter() : onLeave())),
@@ -479,7 +540,7 @@
         showPopup({ icon: 'caps', label: 'Caps Lock', value: e.payload ? 'On' : 'Off', tone: e.payload ? 'ok' : undefined }),
       ),
     ];
-    invoke<Dock>('island_dock').then(docked);
+    invoke<Dock>('island_dock').then((d) => docked(d, false));
     // Catch up if the cursor was already over the island when this page loaded.
     invoke<boolean>('is_hovered').then((over) => over && onEnter());
     return () => unlisten.forEach((p) => p.then((off) => off()));
@@ -491,200 +552,225 @@
 <!-- Dragging it moves it; the parts inside are the controls. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
+  bind:this={islandEl}
   class="island {dock}"
   class:side
   class:grow
   class:idle={mode === 'idle'}
   class:dragging
-  class:snapping
-  style="--w: {shape.w}px; --h: {shape.h}px; --r: {shape.r}px; --edge-r: {gap > 0 ? shape.r : 0}px; --gap: {gap}px"
+  style="--w: {shape.w}px; --h: {shape.h}px; --r: {shape.r}px; --edge-r: {floating ? shape.r : 0}px; --ear: {floating ? 0 : earOf(shape)}px; --gap: {gap}px"
   onwheel={onWheel}
   onpointerdown={pressDown}
   onpointermove={pressMove}
   onpointerup={() => (press = null)}
   onclickcapture={swallowClick}
 >
-  <!-- Each glass refresh copies the screen back from the GPU, so only what you're interacting with
-       gets 30fps; the resting pill refreshes once a second and the live bar 4 times. While it's
-       carried the backdrop can't keep up, so it goes solid. -->
-  <Glass
-    {shape}
-    {dock}
-    {gap}
-    active={!dragging}
-    frameMs={mode === 'idle' ? 1000 : mode === 'live' || mode === 'work' ? 250 : 33}
-    prewarm={[
-      [away, restGap(away)],
-      [sleeping, restGap(sleeping)],
-      [shapes.live, ISLAND_GAP],
-      ...[shapes.peek, shapes.expanded, shapes.wide, shapes.popup, shapes.voice, shapes.work].map((s): [Shape, number] => [s, 0]),
-    ]}
-  />
-  <div class="glow" class:on={glow} style="--album: {glowColour ?? '255 255 255'}"></div>
+  <div class="clip">
+    <!-- Each glass refresh copies the screen back from the GPU, so only what you're interacting with
+         gets 30fps; the resting pill refreshes once a second and the live bar 4 times. While it's
+         carried the backdrop can't keep up, so it goes solid. -->
+    <Glass
+      {shape}
+      {dock}
+      {gap}
+      active={!dragging}
+      frameMs={mode === 'idle' ? 1000 : mode === 'live' || mode === 'work' ? 250 : 33}
+      prewarm={[
+        [away, restGap(away)],
+        [sleeping, restGap(sleeping)],
+        [shapes.live, ISLAND_GAP],
+        ...[shapes.peek, shapes.expanded, shapes.wide, shapes.popup, shapes.voice, shapes.work].map((s): [Shape, number] => [s, 0]),
+      ]}
+    />
+    <div class="glow" class:on={glow} style="--album: {glowColour ?? '255 255 255'}"></div>
 
-  {#if mode === 'idle' && petOut}
-    <!-- Its bed, empty while it's out. -->
-  {:else if mode === 'idle'}
-    <div class="layer pet" class:sleeping={idleMood === 'sleep'} in:materialise={{ duration: 200, delay: 100 }} out:fade={{ duration: 80 }}>
-      {#if idleMood === 'sleep'}
-        <span class="clock"><Digits value={time} /></span>
-        <ChocoFace mood={idleMood} size={21} />
-        <span class="day">{day}</span>
-      {:else}
-        <ChocoFace mood={idleMood} size={21} />
-      {/if}
-    </div>
-  {:else if mode === 'peek'}
-    <div class="layer peek" in:materialise={{ duration: 120 }} out:fade={{ duration: 80 }}>
-      <BatteryRing />
-      <span class="time">{time}</span>
-      <Bars playing={!!nowPlaying.media?.playing} colour={nowPlaying.colour ? `rgb(${nowPlaying.colour})` : 'var(--text-dim)'} size={13} />
-    </div>
-  {:else if mode === 'expanded'}
-    <div class="layer expanded" in:materialise={{ duration: 160, delay: 90 }} out:fade={{ duration: 80 }}>
-      {#if wide}
-        <div class="panel wide" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
-          <LyricsView onLyrics={toggleLyrics} />
-        </div>
-      {:else}
-        <div class="panel" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
-          <div class="body">
-            {#key page}
-              <div
-                class="page"
-                in:fly={{ x: 40 * direction, duration: 300, easing: cubicOut }}
-                out:fly={{ x: -40 * direction, duration: 200, easing: cubicOut }}
-              >
-                {#if page === 0}
-                  <NowPlaying {lyricsOn} onLyrics={toggleLyrics} />
-                {:else if page === 1}
-                  <FocusPage />
-                {:else if page === 2}
-                  <WaterPage />
-                {:else if page === 3}
-                  <ShelfPage />
-                {:else}
-                  <TodoPage />
-                {/if}
-              </div>
-            {/key}
+    {#if mode === 'idle' && petOut}
+      <!-- Its bed, empty while it's out. -->
+    {:else if mode === 'idle'}
+      <div class="layer pet" class:sleeping={idleMood === 'sleep'} in:materialise={{ duration: 200, delay: 100 }} out:fade={{ duration: 80 }}>
+        {#if idleMood === 'sleep'}
+          <span class="clock"><Digits value={time} /></span>
+          <ChocoFace mood={idleMood} size={21} />
+          <span class="day">{day}</span>
+        {:else}
+          <ChocoFace mood={idleMood} size={21} />
+        {/if}
+      </div>
+    {:else if mode === 'peek'}
+      <div class="layer peek" in:materialise={{ duration: 120 }} out:fade={{ duration: 80 }}>
+        <BatteryRing />
+        <span class="time">{time}</span>
+        <Bars playing={!!nowPlaying.media?.playing} colour={nowPlaying.colour ? `rgb(${nowPlaying.colour})` : 'var(--text-dim)'} size={13} />
+      </div>
+    {:else if mode === 'expanded'}
+      <div class="layer expanded" in:materialise={{ duration: 160, delay: 90 }} out:fade={{ duration: 80 }}>
+        {#if wide}
+          <div class="panel wide" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
+            <LyricsView onLyrics={toggleLyrics} />
           </div>
-
-          <header>
-            <!-- The music page shows its artwork where the name would be. -->
-            {#if page !== 0}
+        {:else}
+          <div class="panel" in:fade={{ duration: 220, delay: 120 }} out:fade={{ duration: 120 }}>
+            <div class="body">
               {#key page}
-                <span class="title" in:fade={{ duration: 200 }}><i style="background: {current.accent}"></i>{current.name}</span>
+                <div
+                  class="page"
+                  in:fly={{ [side ? 'y' : 'x']: 40 * direction, duration: 300, easing: cubicOut }}
+                  out:fly={{ [side ? 'y' : 'x']: -40 * direction, duration: 200, easing: cubicOut }}
+                >
+                  {#if page === 0}
+                    <NowPlaying {lyricsOn} onLyrics={toggleLyrics} />
+                  {:else if page === 1}
+                    <FocusPage />
+                  {:else if page === 2}
+                    <WaterPage />
+                  {:else if page === 3}
+                    <ShelfPage />
+                  {:else}
+                    <TodoPage />
+                  {/if}
+                </div>
               {/key}
-            {/if}
-            <span class="clock">{date}<b>{time}</b><BatteryRing /></span>
-            <IconButton icon="settings" size={24} quiet label="Settings" onclick={() => play(['settings', 0])} />
-          </header>
+            </div>
 
-          <!-- Arrows stay hidden until the cursor nears an edge. -->
-          <div class="edge left">
-            <button class="nav" aria-label="Previous page" onclick={() => go(-1)}><Icon name="chevron-left" size={16} /></button>
-          </div>
-          <div class="edge right">
-            <button class="nav" aria-label="Next page" onclick={() => go(1)}><Icon name="chevron-right" size={16} /></button>
-          </div>
+            <header>
+              <!-- The music page shows its artwork where the name would be. -->
+              {#if page !== 0}
+                {#key page}
+                  <span class="title" in:fade={{ duration: 200 }}><i style="background: {current.accent}"></i>{current.name}</span>
+                {/key}
+              {/if}
+              <span class="clock">{date}<b>{time}</b><BatteryRing /></span>
+              <IconButton icon="settings" size={24} quiet label="Settings" onclick={() => play(['settings', 0])} />
+            </header>
 
-          <div class="dots">
-            {#each PAGES as p, i}
-              <button class="dot" class:active={i === page} aria-label={p.name} onclick={() => goTo(i)}><i></i></button>
-            {/each}
+            <!-- Arrows stay hidden until the cursor nears an edge. -->
+            <div class="edge left">
+              <button class="nav" aria-label="Previous page" onclick={() => go(-1)}><Icon name="chevron-left" size={16} /></button>
+            </div>
+            <div class="edge right">
+              <button class="nav" aria-label="Next page" onclick={() => go(1)}><Icon name="chevron-right" size={16} /></button>
+            </div>
+
+            <div class="dots">
+              {#each PAGES as p, i}
+                <button class="dot" class:active={i === page} aria-label={p.name} onclick={() => goTo(i)}><i></i></button>
+              {/each}
+            </div>
           </div>
-        </div>
-      {/if}
-    </div>
-  {:else if mode === 'live'}
-    <div class="layer live" class:timer={liveTimer} in:materialise={{ duration: 160, delay: 80 }} out:fade={{ duration: 80 }}>
-      <span class="note-icon" class:timer={liveTimer}>
-        {#if liveTimer}<Icon name="timer" size={15} />{:else}<Bars playing colour={glowColour ? `rgb(${glowColour})` : 'var(--text)'} size={13} />{/if}
-      </span>
-      {#key liveText}
-        <span class="line" in:fade={{ duration: 250 }}>{liveText}</span>
-      {/key}
-      {#if liveTimer}
-        <b class="countdown">{mmss(Math.ceil(focus.remaining(clock.now) / 1000) * 1000)}</b>
-      {/if}
-    </div>
-  {:else if mode === 'control'}
-    <div class="layer" bind:offsetHeight={controlH} in:materialise={{ duration: 200, delay: 90 }} out:fade={{ duration: 80 }}>
-      <ControlCentre />
-    </div>
-  {:else if mode === 'settings'}
-    <div class="layer" bind:offsetHeight={settingsH} in:materialise={{ duration: 180, delay: 100 }} out:fade={{ duration: 80 }}>
-      <Settings {lyricsOn} onLyrics={toggleLyrics} onclose={() => play(['expanded', 0])} />
-    </div>
-  {:else if mode === 'voice'}
-    {@const thinking = choco.state === 'thinking'}
-    <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
-      <ChocoFace mood={thinking ? 'think' : 'alert'} size={17} level={thinking ? 0 : choco.level} />
-      <Wave level={choco.level} {thinking} bars={said ? 10 : 18} />
-      {#key choco.heard}
-        <span class="said" class:waiting={!said} in:fade={{ duration: 220 }}>
-          {said || (thinking ? '' : 'Listening')}
+        {/if}
+      </div>
+    {:else if mode === 'live'}
+      <div class="layer live" class:timer={liveTimer} in:materialise={{ duration: 160, delay: 80 }} out:fade={{ duration: 80 }}>
+        <span class="note-icon" class:timer={liveTimer}>
+          {#if liveTimer}<Icon name="timer" size={15} />{:else}<Bars playing colour={glowColour ? `rgb(${glowColour})` : 'var(--text)'} size={13} />{/if}
         </span>
-      {/key}
-    </div>
-  {:else if mode === 'dictate'}
-    {@const thinking = dictation.state === 'thinking'}
-    <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
-      <span class="mic" class:failed={dictation.failed}><Icon name="mic" size={17} /></span>
-      <Wave level={dictation.level} {thinking} bars={18} />
-      {#key dictation.text}
-        <span class="said" class:waiting={!dictation.text} in:fade={{ duration: 220 }}>
-          {dictation.text || (thinking ? 'Typing' : 'Dictating')}
-        </span>
-      {/key}
-    </div>
-  {:else if mode === 'work'}
-    <!-- Working the desktop: what it's doing, or a Yes / No before anything risky. -->
-    <div class="layer work" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
-      <ChocoFace mood={choco.question ? 'alert' : 'think'} size={17} />
-      {#key choco.question ?? choco.step}
-        <span class="said" class:asking={choco.question} in:fade={{ duration: 220 }}>{choco.question ?? choco.step}</span>
-      {/key}
-      {#if choco.question}
-        <Pill onclick={() => choco.answerQuestion(false)}>No</Pill>
-        <Pill primary onclick={() => choco.answerQuestion(true)}>Yes</Pill>
-      {:else}
-        <button class="stop" onclick={() => choco.stopWork()}>Esc to stop</button>
-      {/if}
-    </div>
-  {:else if mode === 'answer' && choco.reply}
-    <div class="layer" bind:offsetHeight={answerH} in:materialise={{ duration: 160, delay: 110 }} out:fade={{ duration: 100 }}>
-      {#key choco.reply}
-        <Answer
-          reply={choco.reply}
-          heard={choco.followUp ? said : choco.heard}
-          followUp={choco.followUp}
-          level={choco.level}
-          width={answerW}
-          onrevealed={() => choco.revealed()}
-        />
-      {/key}
-    </div>
-  {:else if mode === 'popup'}
-    <div class="layer popup" in:materialise={{ duration: 120, delay: 60 }} out:fade={{ duration: 80 }}>
-      {#key popup}
-        <span class="popup-icon" style="--accent: {popup.accent ?? 'var(--text)'}"><Icon name={popup.icon} size={15} /></span>
-      {/key}
-      <span class="label" class:grow={popup.level === undefined}>{popup.label}</span>
-      {#if popup.level !== undefined}
-        <span class="level"><i style="width: {popup.level}%"></i></span>
-      {/if}
-      {#if popup.value}
-        <span class="value" class:ok={popup.tone === 'ok'} class:bad={popup.tone === 'bad'}>{popup.value}</span>
-      {/if}
-    </div>
-  {/if}
+        {#key liveText}
+          <span class="line" in:fade={{ duration: 250 }}>{liveText}</span>
+        {/key}
+        {#if liveTimer}
+          <b class="countdown">{mmss(Math.ceil(focus.remaining(clock.now) / 1000) * 1000)}</b>
+        {/if}
+      </div>
+    {:else if mode === 'control'}
+      <div class="layer" bind:offsetHeight={controlH} in:materialise={{ duration: 200, delay: 90 }} out:fade={{ duration: 80 }}>
+        <ControlCentre width={shape.w} />
+      </div>
+    {:else if mode === 'settings'}
+      <div class="layer" bind:offsetHeight={settingsH} in:materialise={{ duration: 180, delay: 100 }} out:fade={{ duration: 80 }}>
+        <Settings {lyricsOn} onLyrics={toggleLyrics} onclose={() => play(['expanded', 0])} />
+      </div>
+    {:else if mode === 'voice'}
+      {@const thinking = choco.state === 'thinking'}
+      <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
+        <ChocoFace mood={thinking ? 'think' : 'alert'} size={17} level={thinking ? 0 : choco.level} />
+        <Wave level={choco.level} {thinking} bars={said ? 10 : 18} />
+        {#key choco.heard}
+          <span class="said" class:waiting={!said} in:fade={{ duration: 220 }}>
+            {said || (thinking ? '' : 'Listening')}
+          </span>
+        {/key}
+      </div>
+    {:else if mode === 'dictate'}
+      {@const thinking = dictation.state === 'thinking'}
+      <div class="layer voice" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
+        <span class="mic" class:failed={dictation.failed}><Icon name="mic" size={17} /></span>
+        <Wave level={dictation.level} {thinking} bars={18} />
+        {#key dictation.text}
+          <span class="said" class:waiting={!dictation.text} in:fade={{ duration: 220 }}>
+            {dictation.text || (thinking ? 'Typing' : 'Dictating')}
+          </span>
+        {/key}
+      </div>
+    {:else if mode === 'work'}
+      <!-- Working the desktop: what it's doing, or a Yes / No before anything risky. -->
+      <div class="layer work" in:materialise={{ duration: 140, delay: 60 }} out:fade={{ duration: 80 }}>
+        <ChocoFace mood={choco.question ? 'alert' : 'think'} size={17} />
+        {#key choco.question ?? choco.step}
+          <span class="said" class:asking={choco.question} in:fade={{ duration: 220 }}>{choco.question ?? choco.step}</span>
+        {/key}
+        {#if choco.question}
+          <span class="choice">
+            <Pill onclick={() => choco.answerQuestion(false)}>No</Pill>
+            <Pill primary onclick={() => choco.answerQuestion(true)}>Yes</Pill>
+          </span>
+        {:else}
+          <button class="stop" onclick={() => choco.stopWork()}>Esc to stop</button>
+        {/if}
+      </div>
+    {:else if mode === 'answer' && choco.reply}
+      <div class="layer" bind:offsetHeight={answerH} in:materialise={{ duration: 160, delay: 110 }} out:fade={{ duration: 100 }}>
+        {#key choco.reply}
+          <Answer
+            reply={choco.reply}
+            heard={choco.followUp ? said : choco.heard}
+            followUp={choco.followUp}
+            level={choco.level}
+            width={answerW}
+            onrevealed={() => choco.revealed()}
+          />
+        {/key}
+      </div>
+    {:else if mode === 'popup'}
+      <div class="layer popup" class:levelled={popup.level !== undefined} in:materialise={{ duration: 120, delay: 60 }} out:fade={{ duration: 80 }}>
+        {#key popup}
+          <span class="popup-icon" style="--accent: {popup.accent ?? 'var(--text)'}"><Icon name={popup.icon} size={15} /></span>
+        {/key}
+        <span class="label" class:grow={popup.level === undefined}>{popup.label}</span>
+        {#if popup.level !== undefined}
+          <span class="level"><i style="--level: {popup.level}%"></i></span>
+        {/if}
+        {#if popup.value}
+          <span class="value" class:ok={popup.tone === 'ok'} class:bad={popup.tone === 'bad'}>{popup.value}</span>
+        {/if}
+      </div>
+    {/if}
+  </div>
 </div>
 
+{#if warm}
+  <div class="warm" aria-hidden="true">
+    {#each ['var(--font)', 'var(--font-display)'] as family}
+      {#each [400, 500, 600, 700] as weight}
+        {#each [11, 12.5, 13, 15, 16, 20, 48] as size}
+          <span style="font: {weight} {size}px {family}">Aa09:—…♪</span>
+        {/each}
+      {/each}
+    {/each}
+  </div>
+{/if}
+
 <style>
+  .warm {
+    position: fixed;
+    left: -9999px;
+    top: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
   /* Docked at the top it hangs from the top edge, centred; on a side, from that side, centred
-     top to bottom. --edge-r rounds the corners against the edge: 0 once it's flush. */
+     top to bottom. --edge-r rounds the corners against the edge: 0 once it's flush, when --ear
+     curves them out into the edge instead. Each size and curve moves on its own spring
+     (theme.css), so it changes shape like something soft. */
   .island {
     position: absolute;
     top: var(--gap);
@@ -698,15 +784,72 @@
       0 1px 2px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.5)),
       0 6px 14px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.35)),
       0 18px 50px rgba(0, 0, 0, calc(var(--glass-shadow) * 0.7));
-    overflow: hidden;
     isolation: isolate;
-    transition-property: width, height, border-radius, box-shadow, --gap;
-    transition-duration: var(--morph-shrink);
-    transition-timing-function: var(--ease-out);
+    transition-property: width, height, --r, --edge-r, --ear, --gap, box-shadow;
+    transition-duration:
+      var(--shrink-w-t), var(--shrink-h-t), var(--shrink-h-t), var(--shrink-h-t), var(--shrink-h-t), var(--shrink-h-t),
+      var(--shrink-h-t);
+    transition-timing-function:
+      var(--shrink-w), var(--shrink-h), var(--shrink-h), var(--shrink-h), var(--shrink-h), var(--shrink-h), var(--ease-out);
   }
+  /* Growing, the corners against the edge seep out with a wobble. */
   .island.grow {
-    transition-duration: var(--morph-grow);
-    transition-timing-function: var(--spring-morph);
+    transition-duration:
+      var(--grow-w-t), var(--grow-h-t), var(--grow-h-t), var(--seep-t), var(--seep-t), var(--grow-h-t), var(--grow-h-t);
+    transition-timing-function:
+      var(--grow-w), var(--grow-h), var(--grow-h), var(--seep), var(--seep), var(--grow-h), var(--ease-out);
+  }
+  /* What's inside is cut to the island's outline, which runs on past its box where the corners
+     seep out into the edge. Each of those corners morphs from round (--edge-r) through square to
+     curving outward (--ear): a curve from --d along the edge to --a down the side. 0.4477 puts a
+     cubic's handles where they draw a quarter circle. */
+  .clip {
+    --e: max(0px, var(--edge-r));
+    --f: max(0px, var(--ear));
+    --d: calc(var(--f) - var(--e));
+    --a: calc(var(--e) + var(--f));
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    transition: background 300ms var(--ease-out);
+    clip-path: shape(
+      from calc(-1 * var(--d)) 0,
+      line to calc(100% + var(--d)) 0,
+      curve to 100% var(--a) with calc(100% + 0.4477 * var(--d)) 0 / 100% calc(0.4477 * var(--a)),
+      line to 100% calc(100% - var(--r)),
+      curve to calc(100% - var(--r)) 100% with 100% calc(100% - 0.4477 * var(--r)) / calc(100% - 0.4477 * var(--r)) 100%,
+      line to var(--r) 100%,
+      curve to 0 calc(100% - var(--r)) with calc(0.4477 * var(--r)) 100% / 0 calc(100% - 0.4477 * var(--r)),
+      line to 0 var(--a),
+      curve to calc(-1 * var(--d)) 0 with 0 calc(0.4477 * var(--a)) / calc(-0.4477 * var(--d)) 0,
+      close
+    );
+  }
+  .left .clip {
+    clip-path: shape(
+      from 0 calc(-1 * var(--d)),
+      curve to var(--a) 0 with 0 calc(-0.4477 * var(--d)) / calc(0.4477 * var(--a)) 0,
+      line to calc(100% - var(--r)) 0,
+      curve to 100% var(--r) with calc(100% - 0.4477 * var(--r)) 0 / 100% calc(0.4477 * var(--r)),
+      line to 100% calc(100% - var(--r)),
+      curve to calc(100% - var(--r)) 100% with 100% calc(100% - 0.4477 * var(--r)) / calc(100% - 0.4477 * var(--r)) 100%,
+      line to var(--a) 100%,
+      curve to 0 calc(100% + var(--d)) with calc(0.4477 * var(--a)) 100% / 0 calc(100% + 0.4477 * var(--d)),
+      close
+    );
+  }
+  .right .clip {
+    clip-path: shape(
+      from 0 var(--r),
+      curve to var(--r) 0 with 0 calc(0.4477 * var(--r)) / calc(0.4477 * var(--r)) 0,
+      line to calc(100% - var(--a)) 0,
+      curve to 100% calc(-1 * var(--d)) with calc(100% - 0.4477 * var(--a)) 0 / 100% calc(-0.4477 * var(--d)),
+      line to 100% calc(100% + var(--d)),
+      curve to calc(100% - var(--a)) 100% with 100% calc(100% + 0.4477 * var(--d)) / calc(100% - 0.4477 * var(--a)) 100%,
+      line to var(--r) 100%,
+      curve to 0 calc(100% - var(--r)) with calc(0.4477 * var(--r)) 100% / 0 calc(100% - 0.4477 * var(--r)),
+      close
+    );
   }
   .island.side {
     top: 50%;
@@ -721,11 +864,8 @@
     right: var(--gap);
     border-radius: var(--r) var(--edge-r) var(--edge-r) var(--r);
   }
-  .island.snapping {
-    transition: none;
-  }
   /* Carried: solid, since the glass can't follow the window fast enough. */
-  .island.dragging {
+  .dragging .clip {
     background: rgb(28 28 32 / 0.94);
   }
   /* The resting pill is small; a deep shadow under it would look like a smudge. */
@@ -792,18 +932,18 @@
   .panel.wide {
     width: 675px;
   }
-  /* On a side both layouts are SIDE_W wide and centred top to bottom; lyrics go underneath. */
+  /* On a side both layouts are a tall card, centred top to bottom; lyrics go underneath. The
+     pages lay themselves out down it, in a tighter margin. */
   .side .expanded {
-    width: 400px;
+    width: 340px;
     height: 0;
   }
   .side .panel {
+    --edge: 28px;
     top: 50%;
     left: 0;
     transform: translateY(-50%);
-    width: 400px;
-  }
-  .side .panel.wide {
+    width: 340px;
     height: 360px;
   }
   header {
@@ -887,6 +1027,25 @@
   .nav:active {
     transform: scale(0.96);
   }
+  /* On a side the pages run top to bottom: the arrows turn to point up and down, above and
+     below the page, and the dots run down the far side. */
+  .side .edge {
+    left: 50%;
+    width: 160px;
+    height: 30px;
+    translate: -50% 0;
+  }
+  .side .edge.left {
+    top: 38px;
+    bottom: auto;
+  }
+  .side .edge.right {
+    top: auto;
+    bottom: 2px;
+  }
+  .side .nav {
+    rotate: 90deg;
+  }
 
   .body,
   .page {
@@ -918,6 +1077,7 @@
     background: var(--dot);
     transition:
       width 320ms var(--spring),
+      height 320ms var(--spring),
       background 250ms;
   }
   .dot:hover i {
@@ -926,6 +1086,27 @@
   .dot.active i {
     width: 16px;
     background: var(--text);
+  }
+  .side .dots {
+    left: auto;
+    right: 6px;
+    bottom: auto;
+    top: 50%;
+    transform: translateY(-50%);
+    flex-direction: column;
+  }
+  .right .dots {
+    right: auto;
+    left: 6px;
+  }
+  .side .dot {
+    width: 14px;
+    height: auto;
+    padding: 3px 0;
+  }
+  .side .dot.active i {
+    width: 5px;
+    height: 16px;
   }
 
   .popup {
@@ -972,11 +1153,14 @@
   }
   .level i {
     display: block;
+    width: var(--level);
     height: 100%;
     border-radius: 2px;
     background: var(--text);
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.6);
-    transition: width 160ms var(--ease-out);
+    transition:
+      width 160ms var(--ease-out),
+      height 160ms var(--ease-out);
   }
   .popup .value {
     flex: none;
@@ -990,6 +1174,48 @@
   }
   .popup .value.bad {
     color: var(--bad);
+  }
+  /* On a side a popup stands upright: the icon, the words under it, and a level rising up a
+     bar, like a volume slider on its side. */
+  .side .popup {
+    width: 120px;
+    height: 132px;
+    padding: 16px 12px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+    text-align: center;
+  }
+  .side .popup.levelled {
+    height: 240px;
+  }
+  .side .popup .label {
+    flex: none;
+    max-width: 100%;
+    font-size: 12.5px;
+    line-height: 1.3;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .side .level {
+    flex: 1;
+    width: 6px;
+    height: auto;
+    border-radius: 3px;
+    display: flex;
+    align-items: flex-end;
+  }
+  .side .level i {
+    width: 100%;
+    height: var(--level);
+    border-radius: 3px;
+  }
+  .side .popup .value {
+    min-width: 0;
+    text-align: center;
   }
 
   /* Album-colour light rising from the bottom edge, in lyrics view and the live bar. */
@@ -1126,6 +1352,44 @@
   }
   .stop:hover {
     color: var(--text);
+  }
+  .choice {
+    display: contents;
+  }
+  /* On a side the bars stack: Choco on top, then the wave, then the words (and the buttons). */
+  .side .voice,
+  .side .work {
+    width: 220px;
+    height: 160px;
+    padding: 16px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 12px;
+  }
+  .side .work {
+    width: 260px;
+    height: 184px;
+    gap: 10px;
+  }
+  .side .said {
+    flex: none;
+    max-width: 100%;
+    text-align: center;
+    line-height: 1.35;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+  .side .work .said {
+    text-align: center;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+  }
+  .side .choice {
+    display: flex;
+    gap: 8px;
   }
 
   .live {

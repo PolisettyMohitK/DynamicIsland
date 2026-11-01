@@ -1,31 +1,31 @@
+<script module lang="ts">
+  /** The session last opened up, to come back to when the island reopens soon after closing. */
+  const last = { picked: undefined as string | null | undefined };
+</script>
+
 <script lang="ts">
-  // Control Centre > Claude: your recent Claude Code sessions, what each is doing, and a box to
-  // send a prompt, continuing the picked session or starting one in a recent folder.
+  // Control Centre > Claude: your recent Claude Code sessions and how each is getting on, what
+  // it's doing now and how far down its task list it is. Anything more opens in Claude itself.
   import { claude, type ClaudeSession } from '$lib/claude.svelte';
   import { clock } from '$lib/clock.svelte';
-  import { startTyping, stopTyping, ui } from '$lib/ui.svelte';
+  import { remembers, ui } from '$lib/ui.svelte';
   import Icon from '../Icon.svelte';
 
   const STATUS = { working: 'Working', waiting: 'Waiting', done: 'Done', stopped: 'Idle' } as const;
   const SHOWN = 6;
 
-  let picked = $state<string | null>(null);
-  let text = $state('');
-  let field = $state<HTMLInputElement>();
-  let folderAt = $state(0);
-  /** The picked session's whole latest reply, once read. */
-  let full = $state<string | null>(null);
+  /** The session you opened up (null for none); left alone, the latest one that's busy. */
+  let picked = $state<string | null | undefined>(remembers() ? last.picked : undefined);
+  $effect(() => {
+    last.picked = picked;
+  });
 
-  const selected = $derived(claude.sessions.find((s) => s.id === picked));
-  /** New sessions start in one of the recent sessions' folders. */
-  const folders = $derived([...new Set(claude.sessions.map((s) => s.cwd).filter(Boolean))]);
-  const folder = $derived(folders.length ? folders[folderAt % folders.length] : '');
-  /** Running somewhere else; a second prompt into it would tangle the two. */
   const busy = (s: ClaudeSession) => s.status === 'working' || s.status === 'waiting';
+  const open = $derived(picked === undefined ? claude.sessions.find(busy)?.id : picked);
   /** Opens in the desktop app if that's the pick and it runs this one; otherwise a terminal. */
   const inDesktop = (s: ClaudeSession) => ui.claudeOpen === 'desktop' && !!s.desktop;
-  const blocked = $derived(claude.sending || (selected ? busy(selected) : !folder));
   const name = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+  const done = (s: ClaudeSession) => s.tasks.filter((t) => t.status === 'completed').length;
 
   function ago(ms: number) {
     const min = Math.max(0, Math.round((clock.now - ms) / 60_000));
@@ -34,83 +34,45 @@
     if (min < 60 * 24) return `${Math.round(min / 60)}h`;
     return `${Math.round(min / 60 / 24)}d`;
   }
-
-  function send(e: SubmitEvent) {
-    e.preventDefault();
-    const prompt = text.trim();
-    if (!prompt || blocked) return;
-    if (selected) claude.send(prompt, selected.cwd, selected.id);
-    else claude.send(prompt, folder);
-    text = '';
-    stopTyping();
-  }
-
-  $effect(() => {
-    full = null;
-    if (!selected) return;
-    const id = selected.id;
-    void selected.updated; // read it again when the session moves on
-    let live = true;
-    claude.fullReply(id).then((text) => live && (full = text));
-    return () => (live = false);
-  });
-
-  $effect(() => () => stopTyping());
 </script>
 
 <div class="list">
   {#each claude.sessions.slice(0, SHOWN) as s (s.id)}
-    <button class="row" class:on={picked === s.id} onclick={() => (picked = picked === s.id ? null : s.id)}>
+    <button class="row" class:on={open === s.id} onclick={() => (picked = open === s.id ? null : s.id)}>
       <i class="dot {s.status}" title={STATUS[s.status]}></i>
       <span class="title">{s.title}</span>
-      <span class="meta">{name(s.cwd)} · {ago(s.updated)}</span>
+      <span class="meta">{busy(s) && s.step ? s.step : `${name(s.cwd)} · ${ago(s.updated)}`}</span>
     </button>
-    {#if picked === s.id}
+    {#if open === s.id}
       <div class="more">
-        {#if full ?? s.reply}<p class="said">{full ?? s.reply}</p>{/if}
-        <!-- Only a second terminal on a busy session would tangle; the desktop app just shows it. -->
-        <button class="open" disabled={!inDesktop(s) && (busy(s) || !s.cwd)} onclick={() => claude.open(s, inDesktop(s))}>
-          {inDesktop(s) ? 'Open in desktop app' : 'Open in terminal'}
-        </button>
+        {#if s.tasks.length}
+          <div class="bar"><i style="width: {(done(s) / s.tasks.length) * 100}%"></i></div>
+          <ol class="tasks">
+            {#each s.tasks as t, i (i)}
+              <li class={t.status}>
+                {#if t.status === 'completed'}<Icon name="check" size={11} />{:else}<i></i>{/if}
+                <span>{t.text}</span>
+              </li>
+            {/each}
+          </ol>
+        {:else if s.reply}
+          <p class="said">{s.reply}</p>
+        {/if}
+        <div class="acts">
+          <span class="where">
+            {s.tasks.length ? `${done(s)} of ${s.tasks.length} done` : STATUS[s.status]}
+          </span>
+          <!-- Only a second terminal on a busy session would tangle; the desktop app just shows it. -->
+          <button class="open" disabled={!inDesktop(s) && (busy(s) || !s.cwd)} onclick={() => claude.open(s, inDesktop(s))}>
+            {inDesktop(s) ? 'Open in Claude' : 'Open in terminal'}
+          </button>
+        </div>
       </div>
     {/if}
   {:else}
     <p class="empty">Your Claude Code sessions show up here.</p>
   {/each}
 </div>
-
-{#if claude.reply}
-  <div class="reply" class:bad={!claude.reply.ok}>
-    <p>{claude.reply.text || 'Done, nothing to say.'}</p>
-    <button class="close" aria-label="Dismiss" onclick={() => (claude.reply = null)}><Icon name="x" size={13} /></button>
-  </div>
-{/if}
-
-<form class="ask" onsubmit={send}>
-  {#if selected}
-    <span class="where" title={selected.cwd}>Continue</span>
-  {:else}
-    <button type="button" class="where pick" title={folder} disabled={folders.length < 2} onclick={() => folderAt++}>
-      New in {folder ? name(folder) : '…'}
-    </button>
-  {/if}
-  <input
-    bind:this={field}
-    bind:value={text}
-    placeholder={claude.sending
-      ? `${claude.progress ?? 'Claude is on it'}…`
-      : selected && busy(selected)
-        ? 'Busy in another window'
-        : selected
-          ? `Ask "${selected.title}"`
-          : 'Ask Claude Code'}
-    disabled={blocked}
-    onclick={() => field && startTyping(field)}
-    onkeydown={(e) => e.key === 'Escape' && stopTyping()}
-  />
-  <button type="submit" class="send" aria-label="Send" disabled={blocked || !text.trim()}><Icon name="sparkle" size={14} /></button>
-</form>
-<p class="hint">Runs in the background. It can read and answer, but won't edit files or run commands.</p>
 
 <style>
   button {
@@ -120,7 +82,7 @@
     cursor: pointer;
   }
   .list {
-    max-height: 236px;
+    max-height: 300px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
@@ -192,21 +154,97 @@
     flex: none;
     display: flex;
     flex-direction: column;
+    gap: 8px;
+    padding: 4px 14px 6px 31px;
+  }
+  .bar {
+    height: 3px;
+    border-radius: 2px;
+    background: var(--pill);
+    overflow: hidden;
+  }
+  .bar i {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: #d97757;
+    transition: width 400ms var(--ease-out);
+  }
+  .tasks {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-height: 150px;
+    overflow-y: auto;
+    scrollbar-width: none;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .tasks li {
+    display: flex;
     align-items: flex-start;
-    gap: 6px;
-    padding: 2px 14px 6px 31px;
+    gap: 8px;
+    color: var(--text-dim);
+  }
+  /* The tick, or a ring for what's to come (filled for the one under way). */
+  .tasks li > :global(svg),
+  .tasks li > i {
+    flex: none;
+    width: 11px;
+    height: 11px;
+    margin-top: 2px;
+  }
+  .tasks li > i {
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1.5px solid var(--text-faint);
+  }
+  .tasks .completed {
+    color: var(--text-faint);
+  }
+  .tasks .completed > :global(svg) {
+    color: var(--ok);
+  }
+  .tasks .in_progress {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .tasks .in_progress > i {
+    border: none;
+    background: #d97757;
+    scale: 0.7;
+    animation: pulse 1.2s var(--ease-out) infinite;
   }
   .said {
     margin: 0;
-    max-height: 132px;
-    overflow-y: auto;
-    scrollbar-width: none;
     font-size: 12px;
     line-height: 1.45;
     color: var(--text-dim);
-    white-space: pre-wrap;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    overflow: hidden;
+  }
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .where {
+    flex: 1;
+    min-width: 0;
+    font-size: 11.5px;
+    color: var(--text-faint);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .open {
+    flex: none;
     height: 24px;
     padding: 0 10px;
     border-radius: 12px;
@@ -229,104 +267,5 @@
     text-align: center;
     font-size: 12.5px;
     color: var(--text-dim);
-  }
-  .reply {
-    position: relative;
-    padding: 10px 34px 10px 14px;
-    border-radius: 12px;
-    background: color-mix(in srgb, #d97757 14%, transparent);
-  }
-  .reply.bad {
-    background: color-mix(in srgb, var(--bad) 14%, transparent);
-  }
-  .reply p {
-    margin: 0;
-    max-height: 96px;
-    overflow-y: auto;
-    scrollbar-width: none;
-    font-size: 12.5px;
-    line-height: 1.45;
-    white-space: pre-wrap;
-  }
-  .close {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    width: 22px;
-    height: 22px;
-    border-radius: 11px;
-    display: grid;
-    place-items: center;
-    background: none;
-    color: var(--text-dim);
-  }
-  .close:hover {
-    color: var(--text);
-  }
-  .ask {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    height: 36px;
-    padding: 0 4px 0 6px;
-    border-radius: 18px;
-    background: var(--pill);
-  }
-  .where {
-    flex: none;
-    max-width: 140px;
-    height: 26px;
-    padding: 0 10px;
-    border-radius: 13px;
-    display: inline-flex;
-    align-items: center;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--text-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    background: var(--pill);
-  }
-  .pick:not(:disabled):hover {
-    color: var(--text);
-    background: var(--pill-hover);
-  }
-  .pick:disabled {
-    cursor: default;
-  }
-  input {
-    flex: 1;
-    min-width: 0;
-    height: 100%;
-    border: none;
-    outline: none;
-    background: none;
-    color: var(--text);
-    font: 500 12.5px var(--font);
-  }
-  input::placeholder {
-    color: var(--text-faint);
-  }
-  .send {
-    flex: none;
-    width: 28px;
-    height: 28px;
-    border-radius: 14px;
-    display: grid;
-    place-items: center;
-    background: #d97757;
-    color: #fff;
-    transition: opacity 160ms;
-  }
-  .send:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-  .hint {
-    margin: 0;
-    text-align: center;
-    font-size: 11px;
-    color: var(--text-faint);
   }
 </style>

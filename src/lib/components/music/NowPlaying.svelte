@@ -106,4 +106,35 @@
     font-size: 12.5px;
     color: var(--text-faint);
   }
+  /* On a side the player stands: the artwork big on top, then the words, the bar and the
+     buttons under it, all centred. */
+  :global(.side) .art {
+    left: 50%;
+    translate: -50% 0;
+    top: 92px;
+    scale: 1.5;
+  }
+  :global(.side) .meta {
+    left: var(--edge);
+    right: var(--edge);
+    top: 186px;
+    align-items: center;
+    text-align: center;
+  }
+  :global(.side) .meta b,
+  :global(.side) .meta span {
+    max-width: 100%;
+  }
+  :global(.side) .eq {
+    top: 76px;
+  }
+  :global(.side) .progress {
+    top: 238px;
+  }
+  :global(.side) .controls {
+    top: 266px;
+  }
+  :global(.side) .empty {
+    inset: 72px 28px 40px;
+  }
 </style>

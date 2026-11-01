@@ -1,22 +1,31 @@
 // Window placement, hover tracking, click-through, hiding and
 // Caps Lock events for the island window. Dragging the island moves it to the nearest screen
-// edge (top, left or right), where it docks; `island-dock` says which, `island-dragging`
-// whether it's being carried.
+// edge (top, left or right), where it docks: let go, it flies there. `island-dock` says which
+// edge, `island-dragging` whether it's being carried (until it reaches the edge).
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 
-// Logical size of the transparent window at the top: the largest state (a long answer) plus
-// room for its shadow. On a side it's SIDE_WIDTH wide and as tall as the work area.
-pub const WINDOW_WIDTH: f64 = 900.0;
-pub const WINDOW_HEIGHT: f64 = 640.0;
-pub const SIDE_WIDTH: f64 = 480.0;
+// Logical width of the transparent window: the widest state (reading a Claude chat) plus room
+// for its shadow. It's as tall as the screen above the taskbar, and the same size at every edge,
+// so docking somewhere else only moves it.
+pub const WINDOW_WIDTH: f64 = 1000.0;
 const DOCK_FILE: &str = "island_dock.txt";
-/// How often the window follows the cursor while it's carried.
+/// How often the window follows the cursor while it's carried, or flies.
 const DRAG_POLL: Duration = Duration::from_millis(7);
+/// The spring the island flies to its edge along: `--fly` in theme.css, which the page moves the
+/// island inside the window with, so the two add up to one straight flight.
+const FLY_DURATION: f64 = 0.6;
+const FLY_BOUNCE: f64 = 0.26;
+/// When that spring has settled (`--fly-t`), seconds.
+const FLY_SETTLE: f64 = 0.77;
+/// This far along it has reached the edge, and stops being carried.
+const LANDED: f64 = 0.97;
+/// How long a let-go island waits for the page to take its new layout before it flies anyway.
+const FLY_WAIT: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -40,6 +49,8 @@ impl Dock {
 
 static DOCK: AtomicU8 = AtomicU8::new(0);
 static DRAGGING: AtomicBool = AtomicBool::new(false);
+/// The page has laid the island out for its new edge, so it can fly there.
+static FLY: AtomicBool = AtomicBool::new(false);
 
 fn dock() -> Dock {
     Dock::ALL[DOCK.load(Ordering::Relaxed) as usize]
@@ -95,24 +106,25 @@ fn config(app: &AppHandle) -> Option<std::path::PathBuf> {
     Some(app.path().app_config_dir().ok()?.join(DOCK_FILE))
 }
 
-/// Size and place the window for `dock` on `monitor`: flush against that edge, and on a side
-/// as tall as the space above the taskbar.
-fn layout(window: &WebviewWindow, monitor: &tauri::Monitor, dock: Dock) -> tauri::Result<()> {
-    let scale = monitor.scale_factor();
+/// The window's physical (x, y, width, height) docked at `dock` on `monitor`: flush against
+/// that edge (centred along the top), from the top of the screen down to the taskbar.
+fn spot(monitor: &tauri::Monitor, dock: Dock) -> (i32, i32, i32, i32) {
     let (mx, my) = (monitor.position().x, monitor.position().y);
     let mw = monitor.size().width as i32;
     let work = monitor.work_area();
-    let (w, h, x, y) = match dock {
-        Dock::Top => {
-            let w = (WINDOW_WIDTH * scale).round() as i32;
-            (w, (WINDOW_HEIGHT * scale).round() as i32, mx + (mw - w) / 2, my)
-        }
-        Dock::Left | Dock::Right => {
-            let w = (SIDE_WIDTH * scale).round() as i32;
-            let x = if dock == Dock::Left { mx } else { mx + mw - w };
-            (w, work.size.height as i32, x, work.position.y)
-        }
+    let w = (WINDOW_WIDTH * monitor.scale_factor()).round() as i32;
+    let h = work.position.y + work.size.height as i32 - my;
+    let x = match dock {
+        Dock::Top => mx + (mw - w) / 2,
+        Dock::Left => mx,
+        Dock::Right => mx + mw - w,
     };
+    (x, my, w, h)
+}
+
+/// Size and place the window for `dock` on `monitor`.
+fn layout(window: &WebviewWindow, monitor: &tauri::Monitor, dock: Dock) -> tauri::Result<()> {
+    let (x, y, w, h) = spot(monitor, dock);
     window.set_size(tauri::PhysicalSize::new(w, h))?;
     window.set_position(tauri::PhysicalPosition::new(x, y))
 }
@@ -132,7 +144,7 @@ fn nearest(app: &AppHandle, (cx, cy): (i32, i32)) -> Option<(tauri::Monitor, Doc
     Some((monitor, dock))
 }
 
-/// Carry the island with the cursor until the button is let go, then dock it at the nearest
+/// Carry the island with the cursor until the button is let go, then fly it to the nearest
 /// edge. Windows' own window drag isn't used: it shows the window's outline and stalls the page.
 #[tauri::command]
 pub fn island_drag(app: AppHandle, window: WebviewWindow) {
@@ -154,12 +166,56 @@ pub fn island_drag(app: AppHandle, window: WebviewWindow) {
                 let _ = std::fs::create_dir_all(file.parent().unwrap());
                 let _ = std::fs::write(file, d.name());
             }
-            let _ = layout(&window, &monitor, d);
-            let _ = app.emit("island-dock", d);
+            fly(&app, &window, &monitor, d);
+        } else {
+            let _ = app.emit("island-dragging", false);
         }
-        let _ = app.emit("island-dragging", false);
         DRAGGING.store(false, Ordering::Release);
     });
+}
+
+/// The page has the island laid out for its new edge, offset to stay where it was let go.
+#[tauri::command]
+pub fn island_fly() {
+    FLY.store(true, Ordering::Release);
+}
+
+/// Fly a let-go island to `dock`: the page lays it out for that edge (`island-dock`) and moves it
+/// home inside the window while the window springs home along the same curve, so on screen it
+/// travels in one line, overshoots the edge a little and settles.
+fn fly(app: &AppHandle, window: &WebviewWindow, monitor: &tauri::Monitor, dock: Dock) {
+    let (x, y, w, _) = spot(monitor, dock);
+    FLY.store(false, Ordering::Release);
+    let _ = app.emit("island-dock", dock);
+    let asked = Instant::now();
+    while !FLY.load(Ordering::Acquire) && asked.elapsed() < FLY_WAIT {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Onto a monitor of another size it changes size too, which can't fly: it just goes there.
+    if let Some((left, top, _, _)) = frame().filter(|f| f.2 == w) {
+        let (dx, dy) = ((left - x) as f64, (top - y) as f64);
+        let start = Instant::now();
+        let mut landed = false;
+        while start.elapsed().as_secs_f64() < FLY_SETTLE {
+            let rest = 1.0 - spring(start.elapsed().as_secs_f64());
+            move_to(x + (dx * rest).round() as i32, y + (dy * rest).round() as i32);
+            if !landed && rest <= 1.0 - LANDED {
+                landed = true;
+                let _ = app.emit("island-dragging", false);
+            }
+            std::thread::sleep(DRAG_POLL);
+        }
+    }
+    let _ = layout(window, monitor, dock);
+    let _ = app.emit("island-dragging", false);
+}
+
+/// How far along its flight the island is `t` seconds in: 0 to 1, past it a little and back.
+fn spring(t: f64) -> f64 {
+    let w = std::f64::consts::TAU / FLY_DURATION;
+    let z = 1.0 - FLY_BOUNCE;
+    let wd = w * (1.0 - z * z).sqrt();
+    1.0 - (-z * w * t).exp() * ((wd * t).cos() + z * w / wd * (wd * t).sin())
 }
 
 /// Just under the island where it rests (beside it on a side), for the pet to hop out of and
@@ -377,4 +433,21 @@ fn caps_lock_on() -> bool {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn fullscreen_app_active() -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flies_past_the_edge_a_little_then_settles() {
+        let path: Vec<f64> = (0..=770).map(|ms| spring(ms as f64 / 1000.0)).collect();
+        assert_eq!(path[0], 0.0);
+        let peak = path.iter().cloned().fold(0.0, f64::max);
+        assert!(peak > 1.02 && peak < 1.05, "peak {peak}");
+        assert!((path[770] - 1.0).abs() < 0.0015, "settles at {}", path[770]);
+        // It reaches the edge about a third of the way in.
+        let landed = path.iter().position(|&p| p >= LANDED).unwrap();
+        assert!((250..400).contains(&landed), "lands at {landed}ms");
+    }
 }

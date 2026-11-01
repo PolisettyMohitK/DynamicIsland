@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { ISLAND_GAP, islandRect, makeLensMap, readGlassSettings, type Dock, type Shape } from '$lib/glass';
+  import { glassStrip, islandRect, makeLensMap, readGlassSettings, type Dock, type Rect, type Shape } from '$lib/glass';
 
   // Keep only red, green or blue (with alpha).
   const CHANNELS = [
@@ -35,12 +35,13 @@
   const maps = new Map<string, string>();
   const mapFor = (s: Shape, g: number) => {
     const key = `${dock} ${g} ${s.w}x${s.h}x${s.r} ${winW}x${winH}`;
-    if (!maps.has(key)) maps.set(key, makeLensMap(dock, g, winW, winH, s, settings.bezel));
+    if (!maps.has(key)) maps.set(key, makeLensMap(dock, g, winW, winH, s, settings.bezel, glassStrip(dock, winW, winH, s)));
     return maps.get(key)!;
   };
   const map = $derived(mapFor(shape, gap));
+  // Only this strip of the window is captured, bent and drawn.
+  const strip = $derived(glassStrip(dock, winW, winH, shape));
 
-  type Rect = { x: number; y: number; width: number; height: number };
   let canvas: HTMLCanvasElement;
   // Read by the capture loop on every frame without restarting it.
   let grab: Rect = { x: 0, y: 0, width: 1, height: 1 };
@@ -49,12 +50,7 @@
   // that long for a strip big enough to fill it.
   let wake = () => {};
   $effect(() => {
-    // A strip across the window from the screen edge to the island's far side (on a side, the
-    // island's height across the window), whatever the gap.
-    grab =
-      dock === 'top'
-        ? { x: 0, y: 0, width: winW, height: Math.min(winH, ISLAND_GAP + shape.h) }
-        : { x: 0, y: Math.max(0, Math.round((winH - shape.h) / 2)), width: winW, height: Math.min(winH, shape.h) };
+    grab = strip;
     captureEvery = frameMs;
     wake();
   });
@@ -176,13 +172,13 @@
   <filter
     id="island-lens"
     filterUnits="userSpaceOnUse"
-    x="0"
-    y="0"
-    width={winW}
-    height={winH}
+    x={strip.x}
+    y={strip.y}
+    width={strip.width}
+    height={strip.height}
     color-interpolation-filters="sRGB"
   >
-    <feImage href={map} x="0" y="0" width={winW} height={winH} preserveAspectRatio="none" result="map" />
+    <feImage href={map} x={strip.x} y={strip.y} width={strip.width} height={strip.height} preserveAspectRatio="none" result="map" />
     <feGaussianBlur in="SourceGraphic" stdDeviation={settings.blur} edgeMode="duplicate" result="soft" />
     <!-- Bend red, green and blue by slightly different amounts for colour fringing, then recombine. -->
     {#each CHANNELS as matrix, c}
@@ -209,12 +205,12 @@
   height={winH}
   style="width: {winW}px; height: {winH}px"
 ></canvas>
-<div class="tint"></div>
-<div class="dim" style="opacity: {dim}"></div>
-<!-- Flush against the screen edge, the rim and bevel run on past it, so that side has no lip. -->
+<!-- Flush, the tint (and the shine) run on under the corners that seep out into the edge. -->
+<div class="tint {dock}" class:seep={gap <= 0}></div>
+<div class="dim {dock}" class:seep={gap <= 0} style="opacity: {dim}"></div>
+<!-- Flush against the screen edge, the bevel runs on past it, so that side has no lip. -->
 <div class="bevel {dock}" class:flush={gap <= 0}></div>
-<div class="shine" bind:this={shine}></div>
-<div class="rim {dock}" class:flush={gap <= 0}></div>
+<div class="shine {dock}" class:seep={gap <= 0} bind:this={shine}></div>
 
 <style>
   svg {
@@ -253,19 +249,31 @@
     background: rgba(0, 0, 0, 0.35);
     transition: opacity 400ms var(--ease-out);
   }
-  /* Thickness: light caught along the top lip and glowing up from the bottom inside face,
-     with a shaded band where the slab curves away underneath. */
+  /* Thickness, with no hard outline: light glowing in soft from every edge, brightest along the
+     top, with a shaded band where the slab curves away underneath. */
   .bevel {
     position: absolute;
     inset: 0;
     border-radius: inherit;
     box-shadow:
-      inset 0 1.5px 0.5px rgba(255, 255, 255, calc(var(--glass-specular) * 1.2)),
-      inset 0 10px 16px -10px rgba(255, 255, 255, calc(var(--glass-specular) * 0.5)),
-      inset 0 -1.5px 1px rgba(255, 255, 255, calc(var(--glass-specular) * 0.5)),
-      inset 0 -12px 18px -10px rgba(0, 0, 0, 0.45),
-      inset 0 0 var(--glass-thickness) rgba(255, 255, 255, calc(var(--glass-specular) * 0.18));
+      inset 0 14px 20px -12px rgba(255, 255, 255, calc(var(--glass-specular) * 0.55)),
+      inset 0 -16px 22px -12px rgba(0, 0, 0, 0.45),
+      inset 0 0 var(--glass-thickness) rgba(255, 255, 255, calc(var(--glass-specular) * 0.22));
     pointer-events: none;
+  }
+  /* Flush, it fades out before the screen edge, so the sides flow on into the corners seeping
+     out there. */
+  .bevel.flush {
+    mask: linear-gradient(var(--side), transparent 24px, #000 calc(24px + 2 * var(--ear)));
+  }
+  .bevel.flush.top {
+    --side: to bottom;
+  }
+  .bevel.flush.left {
+    --side: to right;
+  }
+  .bevel.flush.right {
+    --side: to left;
   }
   .flush.top {
     top: -24px;
@@ -275,6 +283,15 @@
   }
   .flush.right {
     right: -24px;
+  }
+  .seep.top {
+    left: calc(-1px - var(--ear));
+    right: calc(-1px - var(--ear));
+  }
+  .seep.left,
+  .seep.right {
+    top: calc(-1px - var(--ear));
+    bottom: calc(-1px - var(--ear));
   }
   .shine {
     position: absolute;
@@ -291,24 +308,5 @@
   }
   .shine:global(.on) {
     opacity: 1;
-  }
-  /* Specular rim: a thin gradient border lit from --glass-light, brightest along the top. */
-  .rim {
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    padding: var(--glass-rim);
-    background: linear-gradient(
-      var(--glass-light),
-      rgba(255, 255, 255, var(--glass-specular)) 0%,
-      rgba(255, 255, 255, calc(var(--glass-specular) * 0.2)) 30%,
-      rgba(255, 255, 255, calc(var(--glass-specular) * 0.08)) 55%,
-      rgba(255, 255, 255, calc(var(--glass-specular) * 0.5)) 100%
-    );
-    mask:
-      linear-gradient(#000 0 0) content-box,
-      linear-gradient(#000 0 0);
-    mask-composite: exclude;
-    pointer-events: none;
   }
 </style>

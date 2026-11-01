@@ -81,4 +81,17 @@
       transform: scale(1.025);
     }
   }
+  /* On a side the ring sits on top, the time centred under it. */
+  :global(.side) .ring {
+    right: auto;
+    left: 50%;
+    translate: -50% 0;
+    top: 76px;
+  }
+  :global(.side) .text {
+    left: 0;
+    right: 0;
+    top: 196px;
+    align-items: center;
+  }
 </style>

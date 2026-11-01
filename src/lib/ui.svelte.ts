@@ -23,6 +23,14 @@ export const ui = $state({
   claudeOpen: load<ClaudeOpen>('claudeOpen', 'desktop'),
 });
 
+/** Closed for less than this, the island opens again just where it was left: long enough to look
+    away and come back, short enough that a fresh visit starts at the top. */
+const REMEMBER_MS = 30_000;
+/** When the island last closed from open. */
+export const closed = { at: 0 };
+/** The island closed only a moment ago, so it reopens where it was. */
+export const remembers = () => Date.now() - closed.at < REMEMBER_MS;
+
 export function setClaudeOpen(where: ClaudeOpen) {
   ui.claudeOpen = where;
   save('claudeOpen', where);

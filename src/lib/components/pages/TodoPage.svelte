@@ -328,4 +328,13 @@
     font-size: 12.5px;
     color: var(--text-faint);
   }
+  /* On a side the list goes under the count, the card's full width. */
+  :global(.side) .summary {
+    top: 72px;
+  }
+  :global(.side) .card {
+    left: var(--edge);
+    top: 200px;
+    height: 120px;
+  }
 </style>

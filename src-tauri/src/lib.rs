@@ -105,6 +105,7 @@ pub fn run() {
             island::is_hovered,
             island::set_typing,
             island::island_drag,
+            island::island_fly,
             island::island_dock,
             capture::capture_backdrop,
             status::status_current,
@@ -166,8 +167,6 @@ pub fn run() {
             waves::waves_start,
             waves::waves_stop,
             claude::claude_sessions,
-            claude::claude_send,
-            claude::claude_reply,
             claude::claude_open,
         ])
         .run(tauri::generate_context!())

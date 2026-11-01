@@ -211,4 +211,20 @@
     background: var(--pill-hover);
     color: var(--text);
   }
+  /* On a side the shelf is tall: files wrap into rows and scroll down. */
+  :global(.side) .zone,
+  :global(.side) .files {
+    top: 72px;
+    height: 228px;
+  }
+  :global(.side) .files {
+    flex-wrap: wrap;
+    align-content: flex-start;
+    row-gap: 10px;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  :global(.side) .clear {
+    top: 306px;
+  }
 </style>

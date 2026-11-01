@@ -1,15 +1,14 @@
-// Claude Code in the island: your recent sessions and what each is up to, read from the
-// transcripts Claude Code keeps in ~/.claude/projects (the desktop app's sessions too), and
-// prompts sent from the island, which run headless (`claude -p`) in the background.
+// Claude Code in the island: your recent sessions and how each is getting on (what it's doing
+// now, and its task list), read from the transcripts Claude Code keeps in ~/.claude/projects
+// (the desktop app's sessions too). Anything more is for Claude itself, which it opens.
 //
 // `claude-sessions` carries the list whenever it changes, and `claude-done` names a session
-// that just finished a turn. `claude-progress` says what a prompt sent from here is doing, and
-// `claude-reply` carries its answer.
+// that just finished a turn.
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
@@ -21,7 +20,7 @@ use tauri::{AppHandle, Emitter};
 const SHOWN: usize = 8;
 const POLL: Duration = Duration::from_secs(3);
 /// Transcripts run to hundreds of MB, so only their ends are read: this much first, then more
-/// if that held no messages.
+/// if that held no messages, or not the start of the task list. After that, just what's added.
 const TAILS: [u64; 3] = [256 << 10, 2 << 20, 8 << 20];
 /// How much of the start is read for the folder the session began in.
 const HEAD: u64 = 64 << 10;
@@ -29,9 +28,8 @@ const HEAD: u64 = 64 << 10;
 const TOOL_PATIENCE: Duration = Duration::from_secs(20);
 /// Nothing for this long and it isn't working any more (or just done), just idle.
 const GONE_QUIET: Duration = Duration::from_secs(30 * 60);
-/// The list carries this much of each latest reply; picking a session reads up to FULL_CHARS.
+/// The list carries this much of each latest reply.
 const REPLY_CHARS: usize = 280;
-const FULL_CHARS: usize = 20_000;
 
 #[derive(Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +45,18 @@ pub struct Session {
     pub reply: Option<String>,
     /// The desktop app's own id for it, if the desktop app runs it.
     pub desktop: Option<String>,
+    /// What it did last, in a few words ("Editing app.rs").
+    pub step: Option<String>,
+    /// The task list it keeps for what you last asked, if it keeps one.
+    pub tasks: Vec<Task>,
+}
+
+/// A step of a session's task list.
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct Task {
+    pub text: String,
+    /// pending, in_progress, or completed.
+    pub status: String,
 }
 
 #[derive(Clone, Default)]
@@ -57,6 +67,12 @@ struct Tail {
     /// The last message: Some(stop reason) for Claude's, None for yours (or a tool's result).
     last: Option<Option<String>>,
     reply: Option<String>,
+    step: Option<String>,
+    tasks: Vec<Task>,
+    /// Saw where the task list begins: your ask, or the list sent whole.
+    anchored: bool,
+    /// How far it's been read: to the end of the last whole line.
+    read_to: u64,
 }
 
 type DesktopCache = HashMap<PathBuf, (SystemTime, Option<(String, String)>)>;
@@ -157,7 +173,12 @@ fn read_sessions(cache: &mut HashMap<PathBuf, (SystemTime, Tail)>, desktop: &Has
         .into_iter()
         .map(|(path, modified)| {
             if cache.get(&path).is_none_or(|(m, _)| *m != modified) {
-                cache.insert(path.clone(), (modified, read_tail(&path)));
+                let tail = cache
+                    .remove(&path)
+                    .map(|(_, tail)| tail)
+                    .and_then(|mut tail| read_more(&path, &mut tail).then_some(tail))
+                    .unwrap_or_else(|| read_tail(&path));
+                cache.insert(path.clone(), (modified, tail));
             }
             let tail = &cache[&path].1;
             let age = now.duration_since(modified).unwrap_or_default();
@@ -190,7 +211,9 @@ fn read_sessions(cache: &mut HashMap<PathBuf, (SystemTime, Tail)>, desktop: &Has
                 cwd,
                 status,
                 updated: modified.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
-                reply: tail.reply.as_deref().map(snippet),
+                reply: tail.reply.clone(),
+                step: tail.step.clone(),
+                tasks: tail.tasks.clone(),
             }
         })
         .collect()
@@ -203,17 +226,6 @@ fn snippet(text: &str) -> String {
 /// Session ids are UUIDs; anything else isn't looked up (or put on a command line).
 fn valid(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
-
-/// The whole of a session's latest reply, for when it's picked.
-#[tauri::command]
-pub fn claude_reply(id: String) -> Option<String> {
-    if !valid(&id) {
-        return None;
-    }
-    let projects = home()?.join(".claude").join("projects");
-    let path = std::fs::read_dir(projects).ok()?.flatten().map(|d| d.path().join(format!("{id}.jsonl"))).find(|p| p.exists())?;
-    read_tail(&path).reply
 }
 
 /// Opens the session to carry on there with everything Claude Code can do: in the desktop app
@@ -249,32 +261,71 @@ fn read_tail(path: &Path) -> Tail {
     let mut tail = Tail::default();
     let Ok(mut file) = File::open(path) else { return tail };
     let size = file.metadata().map_or(0, |m| m.len());
-    // The folder it started in (later entries follow every `cd`), which is where it resumes.
+    // The folders it was in near the start (later entries follow every `cd`).
     let mut head = vec![0; HEAD as usize];
     let read = file.read(&mut head).unwrap_or(0);
-    let started_in = String::from_utf8_lossy(&head[..read])
+    let early: Vec<String> = String::from_utf8_lossy(&head[..read])
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .find_map(|e| e["cwd"].as_str().map(str::to_string));
+        .filter_map(|e| e["cwd"].as_str().map(str::to_string))
+        .collect();
     for want in TAILS {
         let start = size.saturating_sub(want);
-        let mut bytes = Vec::new();
-        if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut bytes).is_err() {
+        tail = Tail::default();
+        // The first line is likely cut in half, unless the read began at the start.
+        if !read_lines(&mut file, start, start > 0, &mut tail) {
             return tail;
         }
-        tail = Tail::default();
-        let text = String::from_utf8_lossy(&bytes);
-        // The first line is likely cut in half, unless the read began at the start.
-        for line in text.lines().skip(usize::from(start > 0)) {
-            let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
-            read_entry(&entry, &mut tail);
-        }
-        if tail.last.is_some() || start == 0 {
+        if (tail.last.is_some() && tail.anchored) || start == 0 {
             break;
         }
     }
-    tail.cwd = started_in.or(tail.cwd);
+    // It resumes only in the folder its transcript is filed under, which needn't be one it names
+    // (the desktop app files it under where it began, and its entries can name folders inside
+    // that): take the first of those folders, or a folder they're in, that's filed there.
+    let filed = path.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+    let cwd = early
+        .iter()
+        .chain(tail.cwd.iter())
+        .flat_map(|c| Path::new(c).ancestors())
+        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string())
+        .find(|c| filed.as_deref() == Some(filed_as(c).as_str()))
+        .or(early.first().cloned());
+    tail.cwd = cwd.or(tail.cwd);
     tail
+}
+
+/// Reads on from where `tail` left off, if the transcript only grew since.
+fn read_more(path: &Path, tail: &mut Tail) -> bool {
+    let Ok(mut file) = File::open(path) else { return false };
+    if tail.read_to == 0 || file.metadata().map_or(0, |m| m.len()) < tail.read_to {
+        return false;
+    }
+    // Where it resumes was settled on the first read.
+    let cwd = tail.cwd.clone();
+    let read = read_lines(&mut file, tail.read_to, false, tail);
+    tail.cwd = cwd;
+    read
+}
+
+/// Reads the whole lines from `start` on into `tail`, leaving one still being written.
+fn read_lines(file: &mut File, start: u64, skip_first: bool, tail: &mut Tail) -> bool {
+    let mut bytes = Vec::new();
+    if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut bytes).is_err() {
+        return false;
+    }
+    let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    for line in String::from_utf8_lossy(&bytes[..whole]).lines().skip(usize::from(skip_first)) {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        read_entry(&entry, tail);
+    }
+    tail.read_to = start + whole as u64;
+    true
+}
+
+/// The name of the folder in ~/.claude/projects that Claude Code files `cwd`'s sessions under.
+fn filed_as(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
 fn read_entry(entry: &Value, tail: &mut Tail) {
@@ -286,10 +337,24 @@ fn read_entry(entry: &Value, tail: &mut Tail) {
         Some("custom-title") => tail.title = text(&entry["customTitle"]).or(tail.title.take()),
         Some("last-prompt") => tail.last_prompt = text(&entry["lastPrompt"]).or(tail.last_prompt.take()),
         // Side chains are subagents' own conversations, not the session's.
-        Some("user") if entry["isSidechain"] != true && entry["isMeta"] != true => tail.last = Some(None),
+        Some("user") if entry["isSidechain"] != true && entry["isMeta"] != true => {
+            tail.last = Some(None);
+            // A new ask starts afresh (a summary after compacting carries on with the old one).
+            if asks(&entry["message"]["content"]) && entry["isCompactSummary"] != true {
+                tail.step = None;
+                tail.tasks.clear();
+                tail.anchored = true;
+            }
+        }
         Some("assistant") if entry["isSidechain"] != true => {
             let message = &entry["message"];
             tail.last = Some(Some(message["stop_reason"].as_str().unwrap_or("").to_string()));
+            tail.step = doing(message).or(tail.step.take());
+            for call in message["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "tool_use") {
+                let name = call["name"].as_str().unwrap_or("");
+                tail.anchored |= name == "TodoWrite" || (name.ends_with("update_plan") && call["input"]["items"].is_array());
+                plan(name, &call["input"], &mut tail.tasks);
+            }
             let said: String = message["content"]
                 .as_array()
                 .into_iter()
@@ -300,31 +365,56 @@ fn read_entry(entry: &Value, tail: &mut Tail) {
                 .join("\n\n");
             let said = said.trim();
             if !said.is_empty() {
-                tail.reply = Some(said.chars().take(FULL_CHARS).collect());
+                tail.reply = Some(snippet(said));
             }
         }
         _ => {}
     }
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct Reply {
-    /// The session it ran in (a new one unless it continued one).
-    session: Option<String>,
-    text: String,
-    ok: bool,
+/// A prompt of yours, not a tool's result or a slash command (which come wrapped in tags).
+fn asks(content: &Value) -> bool {
+    let typed = |t: &str| !t.trim_start().starts_with('<');
+    match content.as_str() {
+        Some(text) => typed(text),
+        None => content.as_array().is_some_and(|blocks| {
+            blocks.iter().all(|b| b["type"] != "tool_result") && blocks.iter().filter_map(|b| b["text"].as_str()).any(typed)
+        }),
+    }
 }
 
-/// Runs `prompt` headless in `cwd`, continuing `session` if given, and answers with
-/// `claude-reply`. Headless, Claude can't ask before it acts, so anything that needs your OK
-/// (editing files, running commands) is refused and it says so.
-#[tauri::command]
-pub fn claude_send(app: AppHandle, prompt: String, cwd: String, session: Option<String>) {
-    std::thread::spawn(move || {
-        let reply = run(&app, &prompt, &cwd, session.as_deref()).unwrap_or_else(|e| Reply { session: session.clone(), text: e, ok: false });
-        let _ = app.emit("claude-reply", reply);
-    });
+/// Plays a task-list call onto the list: the CLI's TodoWrite sends it whole; the desktop app's
+/// update_plan sends it whole or says which steps moved on (1-based), and wrap_up ends it.
+fn plan(name: &str, input: &Value, tasks: &mut Vec<Task>) {
+    let list = |items: &Value| -> Option<Vec<Task>> {
+        let items = items.as_array()?;
+        Some(items.iter().map(|i| Task { text: i["content"].as_str().unwrap_or("").into(), status: i["status"].as_str().unwrap_or("pending").into() }).collect())
+    };
+    let set = |tasks: &mut Vec<Task>, i: Option<usize>, status: &str| {
+        if let Some(t) = i.and_then(|i| tasks.get_mut(i)) {
+            t.status = status.into();
+        }
+    };
+    let nth = |n: &Value| n.as_u64().and_then(|n| (n as usize).checked_sub(1));
+    if name == "TodoWrite" {
+        *tasks = list(&input["todos"]).unwrap_or_default();
+    } else if name.ends_with("update_plan") {
+        if let Some(items) = list(&input["items"]) {
+            *tasks = items;
+        }
+        if input["advance"] == true {
+            let at = tasks.iter().position(|t| t.status == "in_progress");
+            set(tasks, at, "completed");
+            let next = tasks.iter().position(|t| t.status == "pending");
+            set(tasks, next, "in_progress");
+        }
+        for n in input["done"].as_array().into_iter().flatten() {
+            set(tasks, nth(n), "completed");
+        }
+        set(tasks, nth(&input["start"]), "in_progress");
+    } else if name.ends_with("wrap_up") {
+        tasks.iter_mut().for_each(|t| t.status = "completed".into());
+    }
 }
 
 fn exe() -> PathBuf {
@@ -332,60 +422,7 @@ fn exe() -> PathBuf {
     installed.unwrap_or_else(|| PathBuf::from("claude"))
 }
 
-fn run(app: &AppHandle, prompt: &str, cwd: &str, session: Option<&str>) -> Result<Reply, String> {
-    let mut cmd = Command::new(exe());
-    // A stream of events, so the island can say what it's doing as it goes.
-    cmd.args(["-p", "--output-format", "stream-json", "--verbose"]);
-    if let Some(id) = session {
-        cmd.args(["--resume", id]);
-    }
-    // The prompt goes in on stdin, so nothing in it can be read as a flag.
-    cmd.current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut child = cmd.spawn().map_err(|e| format!("Couldn't start Claude Code: {e}"))?;
-    child.stdin.take().ok_or("no stdin")?.write_all(prompt.as_bytes()).map_err(|e| e.to_string())?;
-    // Read on the side, so a chatty stderr can't fill its pipe and stall the run.
-    let mut stderr = child.stderr.take().ok_or("no stderr")?;
-    let errors = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
-    });
-    let mut result = None;
-    for line in BufReader::new(child.stdout.take().ok_or("no stdout")?).lines().map_while(Result::ok) {
-        let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
-        match event["type"].as_str() {
-            Some("assistant") => {
-                if let Some(doing) = doing(&event["message"]) {
-                    let _ = app.emit("claude-progress", doing);
-                }
-            }
-            Some("result") => result = Some(event),
-            _ => {}
-        }
-    }
-    let _ = child.wait();
-    let json = result.ok_or_else(|| {
-        let err = errors.join().unwrap_or_default();
-        format!("Claude Code failed: {}", err.trim().lines().last().unwrap_or("no output"))
-    })?;
-    let text = json["result"].as_str().unwrap_or("").trim();
-    let ok = json["is_error"] != true;
-    // The command line signs in apart from the desktop app.
-    let text = if !ok && text.starts_with("Not logged in") {
-        "Claude Code isn't signed in here. Open a terminal, run claude, then type /login.".to_string()
-    } else {
-        text.to_string()
-    };
-    Ok(Reply { session: json["session_id"].as_str().map(str::to_string), text, ok })
-}
-
-/// What a step of a run is doing, in a few words.
+/// What a step is doing, in a few words.
 fn doing(message: &Value) -> Option<String> {
     let last = message["content"].as_array()?.last()?;
     if last["type"] == "text" {
@@ -407,7 +444,11 @@ fn doing(message: &Value) -> Option<String> {
         ("Bash" | "PowerShell", _) => "Running a command".into(),
         ("WebSearch" | "WebFetch", _) => "Looking online".into(),
         ("Agent" | "Task", _) => "Sending a helper".into(),
-        (name, _) => format!("Using {name}"),
+        ("TodoWrite", _) => "Planning".into(),
+        (name, _) if name.ends_with("update_plan") => "Planning".into(),
+        (name, _) if name.ends_with("wrap_up") => "Wrapping up".into(),
+        // A connector's tools come as mcp__server__tool.
+        (name, _) => format!("Using {}", name.rsplit("__").next().unwrap_or(name).replace('_', " ")),
     })
 }
 
@@ -435,6 +476,26 @@ mod tests {
     }
 
     #[test]
+    fn resumes_in_the_folder_it_is_filed_under() {
+        let dir = std::env::temp_dir().join("island-test").join("C--code-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let lines = [
+            r#"{"type":"user","cwd":"C:\\code\\other","message":{"role":"user","content":"go"}}"#,
+            r#"{"type":"user","cwd":"C:\\code\\app","message":{"role":"user","content":"go"}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert_eq!(filed_as("C:\\code\\app"), "C--code-app");
+        assert_eq!(read_tail(&path).cwd.as_deref(), Some("C:\\code\\app"));
+        // Filed under a folder that holds the ones it names.
+        let up = dir.parent().unwrap().join("C--code");
+        std::fs::create_dir_all(&up).unwrap();
+        std::fs::write(up.join("s.jsonl"), lines.join("\n") + "\n").unwrap();
+        assert_eq!(read_tail(&up.join("s.jsonl")).cwd.as_deref(), Some("C:\\code"));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
     fn says_what_a_step_is_doing() {
         let step = |c: &str| doing(&serde_json::from_str(&format!(r#"{{"content":[{c}]}}"#)).unwrap());
         assert_eq!(step(r#"{"type":"tool_use","name":"Read","input":{"file_path":"C:\\a\\b.rs"}}"#).as_deref(), Some("Reading b.rs"));
@@ -442,5 +503,49 @@ mod tests {
         assert_eq!(step(r#"{"type":"text","text":"hi"}"#).as_deref(), Some("Writing the answer"));
         assert_eq!(step(r#"{"type":"thinking"}"#), None);
         assert!(!valid("../x") && valid("8be4-7f0a"));
+    }
+
+    #[test]
+    fn keeps_the_task_list() {
+        let call = |name: &str, input: &str| {
+            format!(r#"{{"type":"assistant","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","name":"{name}","input":{input}}}]}}}}"#)
+        };
+        let items = r#"{"items":[{"content":"Look","status":"in_progress"},{"content":"Fix","status":"pending"},{"content":"Test","status":"pending"}]}"#;
+        let lines = [
+            r#"{"type":"user","message":{"content":"fix it"}}"#.to_string(),
+            call("mcp__ccd_turn__update_plan", items),
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#.to_string(),
+            call("mcp__ccd_turn__update_plan", r#"{"advance":true}"#),
+            call("Edit", r#"{"file_path":"C:\\a\\app.rs"}"#),
+        ];
+        let mut tail = Tail::default();
+        for l in &lines {
+            read_entry(&serde_json::from_str(l).unwrap(), &mut tail);
+        }
+        let statuses = |t: &Tail| t.tasks.iter().map(|t| t.status.clone()).collect::<Vec<_>>();
+        assert_eq!(statuses(&tail), ["completed", "in_progress", "pending"]);
+        assert_eq!(tail.tasks[1].text, "Fix");
+        assert_eq!(tail.step.as_deref(), Some("Editing app.rs"));
+        read_entry(&serde_json::from_str(&call("mcp__ccd_turn__update_plan", r#"{"done":[2],"start":3}"#)).unwrap(), &mut tail);
+        assert_eq!(statuses(&tail), ["completed", "completed", "in_progress"]);
+        read_entry(&serde_json::from_str(&call("mcp__ccd_turn__wrap_up", "{}")).unwrap(), &mut tail);
+        assert_eq!(statuses(&tail), ["completed"; 3]);
+        // Read from a file, it looks back past the end for where the list began, then reads on.
+        let path = std::env::temp_dir().join("island-plan-test.jsonl");
+        let filler = r#"{"type":"assistant","message":{"stop_reason":"tool_use","content":[{"type":"tool_use","name":"Read"}]}}"#;
+        let mut text = lines[..4].join("\n") + "\n";
+        text += &(filler.to_string() + "\n").repeat((300 << 10) / filler.len());
+        std::fs::write(&path, &text).unwrap();
+        let mut read = read_tail(&path);
+        assert_eq!(statuses(&read), ["completed", "in_progress", "pending"]);
+        let half = call("mcp__ccd_turn__wrap_up", "{}");
+        std::fs::write(&path, text.clone() + &half[..20]).unwrap();
+        assert!(read_more(&path, &mut read) && statuses(&read)[2] == "pending");
+        std::fs::write(&path, text + &half + "\n").unwrap();
+        assert!(read_more(&path, &mut read) && statuses(&read) == ["completed"; 3]);
+        let _ = std::fs::remove_file(&path);
+        // A new ask clears it.
+        read_entry(&serde_json::from_str(r#"{"type":"user","message":{"content":[{"type":"text","text":"next"}]}}"#).unwrap(), &mut tail);
+        assert!(tail.tasks.is_empty() && tail.step.is_none());
     }
 }

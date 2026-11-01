@@ -9,10 +9,8 @@
   --glass-tint-alpha: 0.45;
   --glass-saturation: 1.6;
   --glass-brightness: 0.8;
-  --glass-specular: 0.42; /* rim highlight strength */
-  --glass-rim: 1px;
-  --glass-thickness: 10px; /* soft inner glow along every edge */
-  --glass-light: 10deg; /* direction the rim is lit from */
+  --glass-specular: 0.42; /* highlight strength */
+  --glass-thickness: 16px; /* soft inner glow along every edge */
   --glass-sheen: 0.21;
   --glass-shadow: 1;
 
@@ -46,11 +44,29 @@
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
   /* Small overshoot for buttons and toggles, so they feel springy */
   --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  /* Spring (duration 0.5s, bounce 0.18) sampled into a curve, so the morph overshoots ~1% and
-     settles like iOS while still running as a plain CSS transition. */
-  --spring-morph: linear(0, 0.021, 0.074, 0.147, 0.232, 0.321, 0.411, 0.497, 0.577, 0.649, 0.714, 0.77, 0.819, 0.86, 0.895, 0.923, 0.946, 0.964, 0.978, 0.989, 0.997, 1.003, 1.007, 1.009, 1.01, 1.011, 1.011, 1.011, 1.01, 1.009, 1.008, 1.007, 1);
-  --morph-grow: 550ms;
-  --morph-shrink: 200ms;
+  /* Springs sampled into curves (each -t is how long it takes to settle), so the island moves
+     like iOS while still running as plain CSS transitions. Width and height get different
+     springs: growing, it stretches out a beat before it drops and wobbles a little; shrinking,
+     it lifts first and then pulls in. Like something soft, not a box being resized. */
+  /* 0.5s, bounce 0.3: overshoots 4.6% */
+  --grow-w: linear(0, 0.03, 0.106, 0.209, 0.326, 0.445, 0.559, 0.663, 0.754, 0.832, 0.895, 0.945, 0.983, 1.01, 1.028, 1.039, 1.045, 1.046, 1.044, 1.041, 1.036, 1.03, 1.025, 1.02, 1.015, 1.011, 1.007, 1.005, 1.002, 1.001, 0.999, 0.999, 0.998, 0.998, 0.998, 0.998, 0.998, 0.998, 0.999, 0.999, 1);
+  --grow-w-t: 830ms;
+  /* 0.58s, bounce 0.2: overshoots 1.5% */
+  --grow-h: linear(0, 0.021, 0.074, 0.149, 0.235, 0.326, 0.417, 0.505, 0.586, 0.66, 0.726, 0.783, 0.832, 0.873, 0.908, 0.935, 0.958, 0.975, 0.988, 0.998, 1.005, 1.01, 1.013, 1.015, 1.015, 1.015, 1.014, 1.013, 1.012, 1.01, 1.009, 1.008, 1.006, 1.005, 1.004, 1.003, 1.003, 1.002, 1.001, 1.001, 1);
+  --grow-h-t: 800ms;
+  /* 0.46s, bounce 0.2: overshoots 1.5% */
+  --shrink-w: linear(0, 0.021, 0.076, 0.151, 0.238, 0.33, 0.422, 0.51, 0.592, 0.665, 0.731, 0.788, 0.837, 0.878, 0.911, 0.939, 0.96, 0.977, 0.99, 1, 1.006, 1.011, 1.013, 1.015, 1.015, 1.015, 1.014, 1.013, 1.011, 1.01, 1.009, 1.007, 1.006, 1.005, 1.004, 1.003, 1.002, 1.002, 1.001, 1.001, 1);
+  --shrink-w-t: 640ms;
+  /* 0.36s, bounce 0.08: no overshoot */
+  --shrink-h: linear(0, 0.013, 0.047, 0.096, 0.153, 0.217, 0.283, 0.348, 0.413, 0.474, 0.532, 0.586, 0.636, 0.682, 0.723, 0.76, 0.793, 0.822, 0.848, 0.87, 0.89, 0.907, 0.922, 0.935, 0.946, 0.955, 0.963, 0.97, 0.976, 0.98, 0.984, 0.988, 0.99, 0.993, 0.994, 0.996, 0.997, 0.998, 0.999, 0.999, 1);
+  --shrink-h-t: 390ms;
+  /* The corners seeping out of the screen edge: 0.5s, bounce 0.36, overshoots 7.2% */
+  --seep: linear(0, 0.031, 0.11, 0.219, 0.342, 0.469, 0.591, 0.701, 0.798, 0.879, 0.943, 0.993, 1.029, 1.052, 1.066, 1.072, 1.072, 1.068, 1.061, 1.053, 1.043, 1.034, 1.026, 1.018, 1.012, 1.006, 1.002, 0.999, 0.997, 0.996, 0.995, 0.995, 0.995, 0.995, 0.996, 0.996, 0.997, 0.998, 0.998, 0.999, 1);
+  --seep-t: 840ms;
+  /* Let go, the island flies to its edge: 0.6s, bounce 0.26, overshoots 3.2%. island.rs moves
+     the window along the same spring (FLY_*), so keep the two in step. */
+  --fly: linear(0, 0.018, 0.066, 0.135, 0.216, 0.303, 0.393, 0.48, 0.563, 0.64, 0.71, 0.772, 0.826, 0.872, 0.911, 0.943, 0.968, 0.988, 1.004, 1.015, 1.023, 1.028, 1.031, 1.032, 1.031, 1.03, 1.028, 1.025, 1.022, 1.02, 1.017, 1.014, 1.012, 1.009, 1.008, 1.006, 1.004, 1.003, 1.002, 1.001, 1);
+  --fly-t: 770ms;
 }
 
 /* How far the island sits off the screen edge it's docked to (ISLAND_GAP in glass.ts while it
@@ -59,6 +75,23 @@
   syntax: '<length>';
   inherits: true;
   initial-value: 8px;
+}
+/* The island's corner radii and the curves its corners seep into the edge with, registered so
+   they animate too (its clip path is drawn from them). */
+@property --r {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+@property --edge-r {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
+}
+@property --ear {
+  syntax: '<length>';
+  inherits: true;
+  initial-value: 0px;
 }
 
 /* Mono: one quiet colour for everything (Settings > Look). */
