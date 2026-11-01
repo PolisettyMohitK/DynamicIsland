@@ -54,6 +54,17 @@ pub fn run() {
         .manage(capture::LastFrame(Mutex::new(Vec::new())))
         .manage(pet::Pet::default())
         .setup(|app| {
+            // It was called Dynamic Island: move its start-with-Windows entry to the new name.
+            #[cfg(windows)]
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                use windows::core::w;
+                use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
+                let run = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+                if unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, run, w!("Dynamic Island")) }.is_ok() {
+                    let _ = app.autolaunch().enable();
+                }
+            }
             let window = app
                 .get_webview_window("main")
                 .expect("main window is defined in tauri.conf.json");
@@ -170,5 +181,5 @@ pub fn run() {
             claude::claude_open,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Dynamic Island");
+        .expect("error while running Islet");
 }

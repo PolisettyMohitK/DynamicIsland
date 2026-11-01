@@ -164,7 +164,7 @@
 
 <main>
   <header>
-    <h1>Dynamic Island</h1>
+    <h1>Islet</h1>
     <p>Hover the island at the top of your screen, or say “Hey Choco”. Closing this window keeps the island running.</p>
   </header>
 

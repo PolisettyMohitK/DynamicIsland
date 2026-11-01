@@ -2,9 +2,9 @@
 
 <img src="src-tauri/icons/128x128@2x.png" width="128" alt="Choco" />
 
-# Dynamic Island
+# Islet
 
-A dynamic island for Windows, made of liquid glass, with a small dog called Choco living in it.
+A floating island for Windows, made of liquid glass, with a small dog called Choco living in it.
 
 Tauri 2 · Svelte 5 · Rust
 
@@ -78,6 +78,14 @@ Paste keys into the dashboard (it opens with the app, or from the tray), pick wh
 - [lrclib.net](https://lrclib.net) for lyrics.
 - [OpenCode Go](https://opencode.ai), [OpenAI](https://openai.com) or [Gemini](https://ai.google.dev) for the brain and computer use, whichever you pick.
 
+## Credits
+
+Designed and built by **Polisetty Mohit K**, with [Claude](https://claude.com/claude-code).
+
+Contributions from Hemanth Varma Kanumuri (local AI, the dashboard and settings window, and fixes).
+
+It started as a fork of [thanvish21/dynamic-island](https://github.com/thanvish21/dynamic-island), but has since been rewritten and none of that code remains.
+
 ## License
 
-MIT © 2026 Polisetty Mohit K. See [LICENSE](LICENSE).
+MIT © 2026 Polisetty Mohit K and contributors. See [LICENSE](LICENSE).

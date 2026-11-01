@@ -1,7 +1,7 @@
 {
   "name": "dynamic-island",
   "version": "1.0.0",
-  "description": "A dynamic island for Windows, with Choco",
+  "description": "A floating island for Windows, with Choco",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

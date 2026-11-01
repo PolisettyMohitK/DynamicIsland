@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Dynamic Island",
+  "productName": "Islet",
   "version": "1.0.0",
   "identifier": "com.polisettymohitk.dynamicisland",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Dynamic Island",
+        "title": "Islet",
         "width": 900,
         "height": 640,
         "decorations": false,
